@@ -36,10 +36,12 @@ type Torbox struct {
 	DownloadUncached bool
 	client           *request.Client
 
-	MountPath   string
-	logger      zerolog.Logger
-	checkCached bool
-	addSamples  bool
+	MountPath       string
+	logger          zerolog.Logger
+	checkCached     bool
+	addSamples      bool
+	minimumFreeSlot int
+	limit           int
 }
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, error) {
@@ -72,6 +74,8 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 		logger:                _log,
 		checkCached:           dc.CheckCached,
 		addSamples:            dc.AddSamples,
+		minimumFreeSlot:       dc.MinimumFreeSlot,
+		limit:                 dc.Limit,
 	}, nil
 }
 
@@ -639,8 +643,36 @@ func (tb *Torbox) GetMountPath() string {
 }
 
 func (tb *Torbox) GetAvailableSlots() (int, error) {
-	//TODO: Implement the logic to check available slots for Torbox
-	return 0, fmt.Errorf("not implemented")
+	// If no limit is configured, return a default high value
+	if tb.limit == 0 {
+		return config.DefaultFreeSlot(), nil
+	}
+
+	// Get all torrents to count active ones
+	torrents, err := tb.GetTorrents()
+	if err != nil {
+		tb.logger.Error().Err(err).Msg("Failed to get torrents for slot calculation")
+		return 0, err
+	}
+
+	// Count active torrents (downloading, cached, or not completed)
+	activeTorrents := 0
+	for _, torrent := range torrents {
+		// Count torrents that are not in a final state
+		if torrent.Status != "downloaded" && torrent.Status != "error" {
+			activeTorrents++
+		}
+	}
+
+	// Calculate available slots: limit - active - minimum to keep free
+	availableSlots := tb.limit - activeTorrents - tb.minimumFreeSlot
+
+	// Ensure we don't return negative slots
+	if availableSlots < 0 {
+		return 0, nil
+	}
+
+	return availableSlots, nil
 }
 
 func (tb *Torbox) GetProfile() (*types.Profile, error) {

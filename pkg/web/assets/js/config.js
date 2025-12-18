@@ -343,11 +343,22 @@ class ConfigManager {
                             <label class="label" for="debrid[${index}].minimum_free_slot">
                                 <span class="label-text font-medium">Minimum Free Slot</span>
                             </label>
-                            <input type="number" class="input input-bordered" 
-                                   name="debrid[${index}].minimum_free_slot" id="debrid[${index}].minimum_free_slot" 
+                            <input type="number" class="input input-bordered"
+                                   name="debrid[${index}].minimum_free_slot" id="debrid[${index}].minimum_free_slot"
                                    placeholder="1" value="1">
                             <div class="label">
-                                <span class="label-text-alt">Minimum free slot for this debrid</span>
+                                <span class="label-text-alt">Minimum free slot to keep available</span>
+                            </div>
+                        </div>
+                        <div class="form-control">
+                            <label class="label" for="debrid[${index}].limit">
+                                <span class="label-text font-medium">Torrent Limit</span>
+                            </label>
+                            <input type="number" class="input input-bordered"
+                                   name="debrid[${index}].limit" id="debrid[${index}].limit"
+                                   placeholder="0 (unlimited)" value="0">
+                            <div class="label">
+                                <span class="label-text-alt">Maximum active torrents (0 = unlimited)</span>
                             </div>
                         </div>
                     </div>
@@ -1114,6 +1125,7 @@ class ConfigManager {
                 folder: document.querySelector(`[name="debrid[${i}].folder"]`).value,
                 rate_limit: document.querySelector(`[name="debrid[${i}].rate_limit"]`).value,
                 minimum_free_slot: parseInt(document.querySelector(`[name="debrid[${i}].minimum_free_slot"]`).value) || 0,
+                limit: parseInt(document.querySelector(`[name="debrid[${i}].limit"]`).value) || 0,
                 rclone_mount_path: document.querySelector(`[name="debrid[${i}].rclone_mount_path"]`).value,
                 proxy: document.querySelector(`[name="debrid[${i}].proxy"]`).value,
                 download_uncached: document.querySelector(`[name="debrid[${i}].download_uncached"]`).checked,
