@@ -148,6 +148,7 @@ type Config struct {
 	AllowedExt         []string    `json:"allowed_file_types,omitempty"`
 	MinFileSize        string      `json:"min_file_size,omitempty"` // Minimum file size to download, 10MB, 1GB, etc
 	MaxFileSize        string      `json:"max_file_size,omitempty"` // Maximum file size to download (0 means no limit)
+	LinkMode           string      `json:"link_mode,omitempty"`     // Mode for creating links: "symlink" or "strm" (default: "symlink")
 	Path               string      `json:"-"`                       // Path to save the config file
 	UseAuth            bool        `json:"use_auth,omitempty"`
 	Auth               *Auth       `json:"-"`
@@ -426,6 +427,11 @@ func (c *Config) setDefaults() {
 	// Set repair defaults
 	if c.Repair.Strategy == "" {
 		c.Repair.Strategy = RepairStrategyPerTorrent
+	}
+
+	// Set link mode default
+	if c.LinkMode == "" {
+		c.LinkMode = "symlink"
 	}
 
 	// Rclone defaults

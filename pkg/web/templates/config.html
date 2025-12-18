@@ -130,7 +130,7 @@
                                 </div>
                             </div>
 
-                            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
                                 <div class="form-control">
                                     <label class="label" for="minFileSize">
                                         <span class="label-text font-medium">Minimum File Size</span>
@@ -150,6 +150,22 @@
                                         <span class="label-text-alt">Maximum file size to download</span>
                                     </div>
                                 </div>
+
+                                <div class="form-control">
+                                    <label class="label" for="linkMode">
+                                        <span class="label-text font-medium">Link Mode</span>
+                                    </label>
+                                    <select class="select select-bordered" name="link_mode" id="linkMode">
+                                        <option value="symlink">Symlink - Create symbolic links (default)</option>
+                                        <option value="strm">STRM - Create .strm files with HTTP URLs</option>
+                                    </select>
+                                    <div class="label">
+                                        <span class="label-text-alt">Choose between symlinks or .strm files for media access</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
 
                                 <div class="form-control">
                                     <label class="label" for="removeStalledAfter">

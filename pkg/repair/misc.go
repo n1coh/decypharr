@@ -2,8 +2,11 @@ package repair
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/debrid/common"
@@ -33,6 +36,62 @@ func getSymlinkTarget(file string) string {
 	return ""
 }
 
+func fileIsStrm(file string) bool {
+	return strings.HasSuffix(strings.ToLower(file), ".strm")
+}
+
+func getStrmURL(file string) string {
+	if !fileIsStrm(file) {
+		return ""
+	}
+
+	content, err := os.ReadFile(file)
+	if err != nil {
+		return ""
+	}
+
+	// Return the URL from the file, trimming any whitespace
+	return strings.TrimSpace(string(content))
+}
+
+// validateStrmURL checks if the URL in a .strm file is still valid by making a HEAD request
+func validateStrmURL(url string) error {
+	if url == "" {
+		return fmt.Errorf("empty URL")
+	}
+
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Allow up to 3 redirects
+			if len(via) >= 3 {
+				return fmt.Errorf("too many redirects")
+			}
+			return nil
+		},
+	}
+
+	// Make HEAD request to check if URL is accessible
+	req, err := http.NewRequest("HEAD", url, nil)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to reach URL: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check HTTP status code
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("URL returned status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
 func fileIsReadable(filePath string) error {
 	// First check if file exists and is accessible
 	info, err := os.Stat(filePath)
@@ -45,7 +104,23 @@ func fileIsReadable(filePath string) error {
 		return fmt.Errorf("not a regular file")
 	}
 
-	// Try to read the first 1024 bytes
+	// Special handling for .strm files
+	if fileIsStrm(filePath) {
+		// Read the URL from the .strm file
+		url := getStrmURL(filePath)
+		if url == "" {
+			return fmt.Errorf("strm file contains no URL")
+		}
+
+		// Validate that the URL is still accessible
+		if err := validateStrmURL(url); err != nil {
+			return fmt.Errorf("strm URL validation failed: %w", err)
+		}
+
+		return nil
+	}
+
+	// For non-.strm files, try to read the first 1024 bytes
 	err = checkFileStart(filePath)
 	if err != nil {
 		return err
@@ -73,6 +148,7 @@ func collectFiles(media arr.Content) map[string][]arr.ContentFile {
 	uniqueParents := make(map[string][]arr.ContentFile)
 	files := media.Files
 	for _, file := range files {
+		// Check if it's a symlink
 		target := getSymlinkTarget(file.Path)
 		if target != "" {
 			file.IsSymlink = true
@@ -81,6 +157,21 @@ func collectFiles(media arr.Content) map[string][]arr.ContentFile {
 			// Set target path folder/file.mkv
 			file.TargetPath = f
 			uniqueParents[torrentNamePath] = append(uniqueParents[torrentNamePath], file)
+			continue
+		}
+
+		// Check if it's a .strm file
+		if fileIsStrm(file.Path) {
+			strmURL := getStrmURL(file.Path)
+			if strmURL != "" {
+				file.IsSymlink = false
+				// For .strm files, we'll use the URL as a marker
+				// The parent folder will be extracted from the file's directory
+				dir := filepath.Dir(file.Path)
+				fileName := filepath.Base(file.Path)
+				file.TargetPath = fileName
+				uniqueParents[dir] = append(uniqueParents[dir], file)
+			}
 		}
 	}
 	return uniqueParents
@@ -156,15 +247,29 @@ func (r *Repair) findDebridForPath(dir string, clients map[string]common.Client)
 		return debridName.(string)
 	}
 
+	r.logger.Debug().Str("dir", dir).Int("numClients", len(clients)).Msg("Finding debrid for path")
+
 	// Find debrid client
 	for _, client := range clients {
 		mountPath := client.GetMountPath()
 		if mountPath == "" {
+			r.logger.Debug().Str("client", client.Name()).Msg("Client has no mount path")
 			continue
 		}
 
-		if filepath.Clean(mountPath) == filepath.Clean(dir) {
+		cleanMount := filepath.Clean(mountPath)
+		cleanDir := filepath.Clean(dir)
+
+		r.logger.Debug().
+			Str("client", client.Name()).
+			Str("mountPath", cleanMount).
+			Str("dir", cleanDir).
+			Msg("Comparing paths")
+
+		// Check if dir starts with mountPath (use HasPrefix for directory matching)
+		if strings.HasPrefix(cleanDir, cleanMount) {
 			debridName := client.Name()
+			r.logger.Debug().Str("debrid", debridName).Msg("Found match using HasPrefix")
 
 			// Cache the result
 			r.debridPathCache.Store(dir, debridName)
@@ -172,6 +277,8 @@ func (r *Repair) findDebridForPath(dir string, clients map[string]common.Client)
 			return debridName
 		}
 	}
+
+	r.logger.Debug().Str("dir", dir).Msg("No debrid found for path")
 
 	// Cache empty result to avoid repeated lookups
 	r.debridPathCache.Store(dir, "")

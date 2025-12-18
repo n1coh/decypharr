@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 
 	"github.com/cavaliergopher/grab/v3"
@@ -472,6 +473,43 @@ func (s *Store) processSymlink(debridTorrent *types.Torrent, torrentRclonePath, 
 	return torrentSymlinkPath, nil
 }
 
+func (s *Store) processStrm(debridTorrent *types.Torrent, torrentStrmPath string) (string, error) {
+	files := debridTorrent.GetFiles()
+	if len(files) == 0 {
+		return "", fmt.Errorf("no valid files found")
+	}
+
+	s.logger.Info().Msgf("Creating .strm files for %d files ...", len(files))
+
+	// Create strm directory
+	err := os.MkdirAll(torrentStrmPath, os.ModePerm)
+	if err != nil {
+		return "", fmt.Errorf("failed to create directory: %s: %v", torrentStrmPath, err)
+	}
+
+	// For each file, create a .strm file containing the HTTP URL
+	for _, file := range files {
+		if file.Link == "" {
+			s.logger.Warn().Msgf("No download link available for file: %s", file.Name)
+			continue
+		}
+
+		// Create strm file path by replacing the original extension with .strm
+		strmFileName := utils.RemoveExtension(file.Name) + ".strm"
+		strmFilePath := filepath.Join(torrentStrmPath, strmFileName)
+
+		// Write the HTTP URL to the .strm file
+		if err := os.WriteFile(strmFilePath, []byte(file.Link), 0644); err != nil {
+			s.logger.Error().Msgf("Failed to create .strm file for %s: %v", file.Name, err)
+			continue
+		}
+
+		s.logger.Info().Msgf("Created .strm file: %s", strmFileName)
+	}
+
+	return torrentStrmPath, nil
+}
+
 // getTorrentPaths returns mountPath and symlinkPath for a torrent
 func (s *Store) getTorrentPaths(arrFolder string, debridTorrent *types.Torrent) (string, string, error) {
 	for {
@@ -491,6 +529,17 @@ func (s *Store) getTorrentPaths(arrFolder string, debridTorrent *types.Torrent) 
 }
 
 func (s *Store) processMultiSeasonSymlinks(torrent *Torrent, debridTorrent *types.Torrent, seasons []SeasonInfo, importReq *ImportRequest) error {
+	cfg := config.Get()
+	useStrm := cfg.LinkMode == "strm"
+
+	// If using strm mode, get download links first
+	if useStrm {
+		client := s.debrid.Debrid(debridTorrent.Debrid).Client()
+		if err := client.GetFileDownloadLinks(debridTorrent); err != nil {
+			return fmt.Errorf("failed to get download links for strm mode: %w", err)
+		}
+	}
+
 	for _, seasonInfo := range seasons {
 		// Create a season-specific debrid torrent
 		seasonDebridTorrent := debridTorrent.Copy()
@@ -529,28 +578,37 @@ func (s *Store) processMultiSeasonSymlinks(torrent *Torrent, debridTorrent *type
 
 		s.logger.Info().Msgf("Processing season %s with %d files", seasonTorrent.Name, len(seasonInfo.Files))
 		var err error
+		var torrentSymlinkPath string
 
-		cache := s.debrid.Debrid(debridTorrent.Debrid).Cache()
-		var torrentRclonePath, torrentSymlinkPath string
-		if cache != nil {
-			torrentRclonePath = filepath.Join(debridTorrent.MountPath, cache.GetTorrentFolder(debridTorrent))
-
+		if useStrm {
+			// STRM mode for multi-season
+			torrentSymlinkPath = filepath.Join(seasonTorrent.SavePath, seasonFolderName)
+			torrentSymlinkPath, err = s.processStrm(seasonDebridTorrent, torrentSymlinkPath)
 		} else {
-			// Regular mount mode
-			torrentRclonePath, _, err = s.getTorrentPaths(seasonTorrent.SavePath, seasonDebridTorrent)
-			if err != nil {
-				return err
+			// Symlink mode for multi-season
+			cache := s.debrid.Debrid(debridTorrent.Debrid).Cache()
+			var torrentRclonePath string
+			if cache != nil {
+				torrentRclonePath = filepath.Join(debridTorrent.MountPath, cache.GetTorrentFolder(debridTorrent))
+
+			} else {
+				// Regular mount mode
+				torrentRclonePath, _, err = s.getTorrentPaths(seasonTorrent.SavePath, seasonDebridTorrent)
+				if err != nil {
+					return err
+				}
 			}
+
+			torrentSymlinkPath = filepath.Join(seasonTorrent.SavePath, seasonFolderName)
+			torrentSymlinkPath, err = s.processSymlink(seasonDebridTorrent, torrentRclonePath, torrentSymlinkPath)
 		}
 
-		torrentSymlinkPath = filepath.Join(seasonTorrent.SavePath, seasonFolderName)
-		torrentSymlinkPath, err = s.processSymlink(seasonDebridTorrent, torrentRclonePath, torrentSymlinkPath)
 		if err != nil {
 			return err
 		}
 
 		if torrentSymlinkPath == "" {
-			return fmt.Errorf("no symlink found for season %d", seasonInfo.SeasonNumber)
+			return fmt.Errorf("no path found for season %d", seasonInfo.SeasonNumber)
 		}
 
 		// Update season torrent with final path

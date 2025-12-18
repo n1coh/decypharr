@@ -160,13 +160,16 @@ func (j *Job) discordContext() string {
 }
 
 func (r *Repair) getArrs(arrNames []string) []string {
+	r.logger.Debug().Strs("arrNames", arrNames).Msg("getArrs called")
 	arrs := make([]string, 0)
 	if len(arrNames) == 0 {
 		// No specific arrs, get all
 		// Also check if any arrs are set to skip repair
 		_arrs := r.arrs.GetAll()
+		r.logger.Debug().Int("totalArrs", len(_arrs)).Msg("Getting all arrs")
 		for _, a := range _arrs {
 			if a.SkipRepair {
+				r.logger.Debug().Str("arr", a.Name).Msg("Skipping arr (SkipRepair=true)")
 				continue
 			}
 			arrs = append(arrs, a.Name)
@@ -174,12 +177,18 @@ func (r *Repair) getArrs(arrNames []string) []string {
 	} else {
 		for _, name := range arrNames {
 			a := r.arrs.Get(name)
-			if a == nil || a.Host == "" || a.Token == "" {
+			if a == nil {
+				r.logger.Warn().Str("arrName", name).Msg("Arr not found")
+				continue
+			}
+			if a.Host == "" || a.Token == "" {
+				r.logger.Warn().Str("arrName", name).Msg("Arr not configured (missing host or token)")
 				continue
 			}
 			arrs = append(arrs, a.Name)
 		}
 	}
+	r.logger.Debug().Strs("selectedArrs", arrs).Int("count", len(arrs)).Msg("Arrs selected for repair")
 	return arrs
 }
 
@@ -233,39 +242,66 @@ func (r *Repair) onComplete() {
 }
 
 func (r *Repair) preRunChecks() error {
+	r.logger.Debug().
+		Bool("useWebdav", r.useWebdav).
+		Bool("isZurg", r.IsZurg).
+		Msg("Running pre-flight checks")
 
 	if r.useWebdav {
 		caches := r.deb.Caches()
+		r.logger.Debug().Int("numCaches", len(caches)).Msg("Checking webdav caches")
 		if len(caches) == 0 {
+			r.logger.Error().Msg("No caches found for webdav mode")
 			return fmt.Errorf("no caches found")
 		}
+		r.logger.Debug().Msg("Webdav caches available")
 		return nil
 	}
 
 	// Check if zurg url is reachable
 	if !r.IsZurg {
+		r.logger.Debug().Msg("Not using Zurg, skipping Zurg checks")
 		return nil
 	}
-	resp, err := http.Get(fmt.Sprint(r.ZurgURL, "/http/version.txt"))
+
+	zurgURL := fmt.Sprint(r.ZurgURL, "/http/version.txt")
+	r.logger.Debug().Str("url", zurgURL).Msg("Checking Zurg availability")
+	resp, err := http.Get(zurgURL)
 	if err != nil {
 		r.logger.Error().Err(err).Msgf("Precheck failed: Failed to reach zurg at %s", r.ZurgURL)
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
-		r.logger.Debug().Msgf("Precheck failed: Zurg returned %d", resp.StatusCode)
-		return err
+		r.logger.Error().Int("statusCode", resp.StatusCode).Msg("Precheck failed: Zurg returned non-OK status")
+		return fmt.Errorf("zurg returned status %d", resp.StatusCode)
 	}
+	r.logger.Debug().Msg("Zurg is reachable")
 	return nil
 }
 
 func (r *Repair) AddJob(arrsNames []string, mediaIDs []string, autoProcess, recurrent bool) error {
+	r.logger.Debug().
+		Strs("arrsNames", arrsNames).
+		Strs("mediaIDs", mediaIDs).
+		Bool("autoProcess", autoProcess).
+		Bool("recurrent", recurrent).
+		Msg("AddJob called")
+		
 	key := jobKey(arrsNames, mediaIDs)
 	job, ok := r.Jobs[key]
 	if job != nil && job.Status == JobStarted {
+		r.logger.Warn().Str("jobKey", key).Msg("Job already running")
 		return fmt.Errorf("job already running")
 	}
 	if !ok {
 		job = r.newJob(arrsNames, mediaIDs)
+		r.logger.Debug().
+			Str("jobID", job.ID).
+			Strs("arrs", job.Arrs).
+			Int("numArrs", len(job.Arrs)).
+			Msg("New repair job created")
+	} else {
+		r.logger.Debug().Str("jobID", job.ID).Msg("Reusing existing job")
 	}
 	job.AutoProcess = autoProcess
 	job.Recurrent = recurrent
@@ -327,10 +363,29 @@ func (r *Repair) StopJob(id string) error {
 }
 
 func (r *Repair) repair(job *Job) error {
+	r.logger.Debug().
+		Str("jobID", job.ID).
+		Strs("arrs", job.Arrs).
+		Int("numArrs", len(job.Arrs)).
+		Strs("mediaIDs", job.MediaIDs).
+		Bool("autoProcess", job.AutoProcess).
+		Msg("Starting repair job")
+
 	defer r.saveToFile()
+
+	if len(job.Arrs) == 0 {
+		r.logger.Warn().Msg("No arrs configured for repair, job will complete immediately")
+		job.Status = JobCompleted
+		job.CompletedAt = time.Now()
+		return nil
+	}
+
 	if err := r.preRunChecks(); err != nil {
+		r.logger.Error().Err(err).Msg("Pre-run checks failed")
 		return err
 	}
+
+	r.logger.Debug().Msg("Pre-run checks passed")
 
 	// Initialize the run
 	r.initRun(job.ctx)
@@ -380,9 +435,12 @@ func (r *Repair) repair(job *Job) error {
 	}
 
 	// Wait for all goroutines to complete and check for errors
+	r.logger.Debug().Msg("Waiting for all arr repairs to complete")
 	if err := g.Wait(); err != nil {
-		// Check if j0b was canceled
+		r.logger.Error().Err(err).Msg("Error during repair execution")
+		// Check if job was canceled
 		if errors.Is(ctx.Err(), context.Canceled) {
+			r.logger.Info().Msg("Job was cancelled")
 			job.Status = JobCancelled
 			job.CompletedAt = time.Now()
 			job.Error = "Job was cancelled"
@@ -401,7 +459,12 @@ func (r *Repair) repair(job *Job) error {
 		return err
 	}
 
+	r.logger.Debug().
+		Int("totalBrokenItems", len(brokenItems)).
+		Msg("Repair scan completed")
+
 	if len(brokenItems) == 0 {
+		r.logger.Debug().Msg("No broken items found, marking job as completed")
 		job.CompletedAt = time.Now()
 		job.Status = JobCompleted
 
@@ -436,19 +499,38 @@ func (r *Repair) repair(job *Job) error {
 }
 
 func (r *Repair) repairArr(job *Job, _arr string, tmdbId string) ([]arr.ContentFile, error) {
+	r.logger.Debug().
+		Str("arr", _arr).
+		Str("tmdbId", tmdbId).
+		Msg("Starting repairArr")
+
 	brokenItems := make([]arr.ContentFile, 0)
 	a := r.arrs.Get(_arr)
 
-	r.logger.Info().Msgf("Starting repair for %s", a.Name)
+	if a == nil {
+		r.logger.Error().Str("arr", _arr).Msg("Arr not found in storage")
+		return brokenItems, fmt.Errorf("arr %s not found", _arr)
+	}
+
+	if a.Host == "" || a.Token == "" {
+		r.logger.Error().
+			Str("arr", a.Name).
+			Str("host", a.Host).
+			Bool("hasToken", a.Token != "").
+			Msg("Arr not configured properly")
+		return brokenItems, fmt.Errorf("arr %s not configured (missing token or host)", a.Name)
+	}
+
+	r.logger.Debug().Msgf("Starting repair for %s", a.Name)
 	media, err := a.GetMedia(tmdbId)
 	if err != nil {
-		r.logger.Info().Msgf("Failed to get %s media: %v", a.Name, err)
+		r.logger.Debug().Msgf("Failed to get %s media: %v", a.Name, err)
 		return brokenItems, err
 	}
-	r.logger.Info().Msgf("Found %d %s media", len(media), a.Name)
+	r.logger.Debug().Msgf("Found %d %s media", len(media), a.Name)
 
 	if len(media) == 0 {
-		r.logger.Info().Msgf("No %s media found", a.Name)
+		r.logger.Debug().Msgf("No %s media found", a.Name)
 		return brokenItems, nil
 	}
 	// Check first media to confirm mounts are accessible
@@ -564,17 +646,41 @@ func (r *Repair) getBrokenFiles(job *Job, media arr.Content) []arr.ContentFile {
 func (r *Repair) getFileBrokenFiles(job *Job, media arr.Content) []arr.ContentFile {
 	// This checks symlink target, try to get read a tiny bit of the file
 
+	r.logger.Debug().
+		Str("mediaTitle", media.Title).
+		Int("mediaID", media.Id).
+		Msg("Starting file-based repair check")
+
 	brokenFiles := make([]arr.ContentFile, 0)
 
 	uniqueParents := collectFiles(media)
+	r.logger.Debug().Int("uniqueParents", len(uniqueParents)).Msg("Collected file parents")
 
 	for parent, files := range uniqueParents {
+		r.logger.Debug().
+			Str("parent", parent).
+			Int("numFiles", len(files)).
+			Msg("Checking files in parent directory")
+
 		// Check stat
 		// Check file stat first
 		for _, file := range files {
+			r.logger.Debug().
+				Str("filePath", file.Path).
+				Str("fileName", file.Name).
+				Msg("Checking file readability")
+
 			if err := fileIsReadable(file.Path); err != nil {
-				r.logger.Debug().Msgf("Broken file found at: %s", parent)
+				r.logger.Debug().
+					Str("filePath", file.Path).
+					Str("parent", parent).
+					Err(err).
+					Msg("Broken file found")
 				brokenFiles = append(brokenFiles, file)
+			} else {
+				r.logger.Debug().
+					Str("filePath", file.Path).
+					Msg("File is readable")
 			}
 		}
 	}

@@ -95,7 +95,7 @@ class ConfigManager {
     populateGeneralSettings(config) {
         const fields = [
             'log_level', 'url_base', 'bind_address', 'port',
-            'discord_webhook_url', 'min_file_size', 'max_file_size', 'remove_stalled_after'
+            'discord_webhook_url', 'min_file_size', 'max_file_size', 'remove_stalled_after', 'link_mode'
         ];
 
         fields.forEach(field => {
@@ -1080,6 +1080,7 @@ class ConfigManager {
                 .split(',').map(ext => ext.trim()).filter(Boolean),
             min_file_size: document.getElementById('minFileSize').value,
             max_file_size: document.getElementById('maxFileSize').value,
+            link_mode: document.getElementById('linkMode').value,
             remove_stalled_after: document.getElementById('removeStalledAfter').value,
             callback_url: document.getElementById('callbackUrl').value,
 

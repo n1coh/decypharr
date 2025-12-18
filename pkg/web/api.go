@@ -234,6 +234,7 @@ func (wb *Web) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	currentConfig.LogLevel = updatedConfig.LogLevel
 	currentConfig.MinFileSize = updatedConfig.MinFileSize
 	currentConfig.MaxFileSize = updatedConfig.MaxFileSize
+	currentConfig.LinkMode = updatedConfig.LinkMode
 	currentConfig.RemoveStalledAfter = updatedConfig.RemoveStalledAfter
 	currentConfig.AllowedExt = updatedConfig.AllowedExt
 	currentConfig.DiscordWebhook = updatedConfig.DiscordWebhook

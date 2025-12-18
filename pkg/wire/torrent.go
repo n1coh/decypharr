@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid"
@@ -144,11 +145,19 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 
 	switch importReq.Action {
 	case "symlink":
-		// Symlink action, we will create a symlink to the torrent
-		s.logger.Debug().Msgf("Post-Download Action: Symlink")
+		// Symlink action, we will create a symlink or strm file based on config
+		cfg := config.Get()
+		useStrm := cfg.LinkMode == "strm"
+
+		if useStrm {
+			s.logger.Debug().Msgf("Post-Download Action: STRM")
+		} else {
+			s.logger.Debug().Msgf("Post-Download Action: Symlink")
+		}
+
 		cache := deb.Cache()
 
-		if cache != nil {
+		if !useStrm && cache != nil {
 			s.logger.Info().Msgf("Using internal webdav for %s", debridTorrent.Debrid)
 			// Use webdav to download the file
 			if err := cache.Add(debridTorrent); err != nil {
@@ -179,27 +188,39 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 			}
 		}
 
-		if cache != nil {
-			torrentRclonePath = filepath.Join(debridTorrent.MountPath, cache.GetTorrentFolder(debridTorrent)) // /mnt/remote/realdebrid/MyTVShow
-			torrentSymlinkPath = filepath.Join(torrent.SavePath, utils.RemoveExtension(debridTorrent.Name))   // /mnt/symlinks/{category}/MyTVShow/
-
-		} else {
-			// User is using either zurg or debrid webdav
-			torrentRclonePath, torrentSymlinkPath, err = s.getTorrentPaths(torrent.SavePath, debridTorrent)
-			if err != nil {
+		if useStrm {
+			// For STRM mode, we need download links
+			if err := client.GetFileDownloadLinks(debridTorrent); err != nil {
 				onFailed(err)
 				return
 			}
-		}
 
-		torrentSymlinkPath, err = s.processSymlink(debridTorrent, torrentRclonePath, torrentSymlinkPath)
+			torrentSymlinkPath = filepath.Join(torrent.SavePath, utils.RemoveExtension(debridTorrent.Name))
+			torrentSymlinkPath, err = s.processStrm(debridTorrent, torrentSymlinkPath)
+		} else {
+			// Symlink mode
+			if cache != nil {
+				torrentRclonePath = filepath.Join(debridTorrent.MountPath, cache.GetTorrentFolder(debridTorrent)) // /mnt/remote/realdebrid/MyTVShow
+				torrentSymlinkPath = filepath.Join(torrent.SavePath, utils.RemoveExtension(debridTorrent.Name))   // /mnt/symlinks/{category}/MyTVShow/
+
+			} else {
+				// User is using either zurg or debrid webdav
+				torrentRclonePath, torrentSymlinkPath, err = s.getTorrentPaths(torrent.SavePath, debridTorrent)
+				if err != nil {
+					onFailed(err)
+					return
+				}
+			}
+
+			torrentSymlinkPath, err = s.processSymlink(debridTorrent, torrentRclonePath, torrentSymlinkPath)
+		}
 
 		if err != nil {
 			onFailed(err)
 			return
 		}
 		if torrentSymlinkPath == "" {
-			err = fmt.Errorf("symlink path is empty for %s", debridTorrent.Name)
+			err = fmt.Errorf("path is empty for %s", debridTorrent.Name)
 			onFailed(err)
 		}
 		onSuccess(torrentSymlinkPath)
