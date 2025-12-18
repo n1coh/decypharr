@@ -875,6 +875,11 @@ func (r *RealDebrid) GetMountPath() string {
 	return r.MountPath
 }
 
+func (r *RealDebrid) GetStreamingURL(torrent *types.Torrent, file *types.File) string {
+	// For RealDebrid, use the download link directly as streaming URL
+	return file.DownloadLink.DownloadLink
+}
+
 func (r *RealDebrid) GetProfile() (*types.Profile, error) {
 	if r.Profile != nil {
 		return r.Profile, nil

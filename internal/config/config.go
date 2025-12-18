@@ -300,8 +300,9 @@ func (c *Config) GetMaxFileSize() int64 {
 }
 
 func (c *Config) IsSizeAllowed(size int64) bool {
+	// Reject empty files (0 bytes) as they are typically duplicates or placeholders
 	if size == 0 {
-		return true // Maybe the debrid hasn't reported the size yet
+		return false
 	}
 	if c.GetMinFileSize() > 0 && size < c.GetMinFileSize() {
 		return false

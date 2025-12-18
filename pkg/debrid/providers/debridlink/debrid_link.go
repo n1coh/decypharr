@@ -466,6 +466,11 @@ func (dl *DebridLink) GetAvailableSlots() (int, error) {
 	return 0, fmt.Errorf("GetAvailableSlots not implemented for DebridLink")
 }
 
+func (dl *DebridLink) GetStreamingURL(torrent *types.Torrent, file *types.File) string {
+	// For DebridLink, use the download link directly as streaming URL
+	return file.DownloadLink.DownloadLink
+}
+
 func (dl *DebridLink) GetProfile() (*types.Profile, error) {
 	if dl.Profile != nil {
 		return dl.Profile, nil

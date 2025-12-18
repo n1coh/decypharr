@@ -190,13 +190,18 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 
 		if useStrm {
 			// For STRM mode, we need download links
+			s.logger.Debug().Msgf("Getting download links for STRM mode...")
 			if err := client.GetFileDownloadLinks(debridTorrent); err != nil {
+				s.logger.Error().Msgf("Failed to get download links: %v", err)
 				onFailed(err)
 				return
 			}
+			s.logger.Debug().Msgf("Download links retrieved successfully")
 
 			torrentSymlinkPath = filepath.Join(torrent.SavePath, utils.RemoveExtension(debridTorrent.Name))
-			torrentSymlinkPath, err = s.processStrm(debridTorrent, torrentSymlinkPath)
+			s.logger.Debug().Msgf("Processing STRM files to: %s", torrentSymlinkPath)
+			torrentSymlinkPath, err = s.processStrm(client, debridTorrent, torrentSymlinkPath)
+			s.logger.Debug().Msgf("STRM processing completed, path: %s, err: %v", torrentSymlinkPath, err)
 		} else {
 			// Symlink mode
 			if cache != nil {
@@ -216,13 +221,17 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 		}
 
 		if err != nil {
+			s.logger.Error().Msgf("Error during file processing: %v", err)
 			onFailed(err)
 			return
 		}
 		if torrentSymlinkPath == "" {
 			err = fmt.Errorf("path is empty for %s", debridTorrent.Name)
+			s.logger.Error().Msgf("Empty path error: %v", err)
 			onFailed(err)
+			return
 		}
+		s.logger.Debug().Msgf("File processing successful, calling onSuccess with path: %s", torrentSymlinkPath)
 		onSuccess(torrentSymlinkPath)
 		return
 	case "download":

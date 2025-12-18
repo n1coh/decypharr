@@ -442,6 +442,11 @@ func (ad *AllDebrid) GetAvailableSlots() (int, error) {
 	return 0, fmt.Errorf("GetAvailableSlots not implemented for AllDebrid")
 }
 
+func (ad *AllDebrid) GetStreamingURL(torrent *types.Torrent, file *types.File) string {
+	// For AllDebrid, use the download link directly as streaming URL
+	return file.DownloadLink.DownloadLink
+}
+
 func (ad *AllDebrid) GetProfile() (*types.Profile, error) {
 	if ad.Profile != nil {
 		return ad.Profile, nil

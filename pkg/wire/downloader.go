@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/pkg/debrid/common"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 
 	"github.com/cavaliergopher/grab/v3"
@@ -473,13 +474,13 @@ func (s *Store) processSymlink(debridTorrent *types.Torrent, torrentRclonePath, 
 	return torrentSymlinkPath, nil
 }
 
-func (s *Store) processStrm(debridTorrent *types.Torrent, torrentStrmPath string) (string, error) {
+func (s *Store) processStrm(client common.Client, debridTorrent *types.Torrent, torrentStrmPath string) (string, error) {
 	files := debridTorrent.GetFiles()
 	if len(files) == 0 {
 		return "", fmt.Errorf("no valid files found")
 	}
 
-	s.logger.Info().Msgf("Creating .strm files for %d files ...", len(files))
+	s.logger.Info().Msgf("Creating .strm files for %d files in torrent %s (ID: %s)", len(files), debridTorrent.Name, debridTorrent.Id)
 
 	// Create strm directory
 	err := os.MkdirAll(torrentStrmPath, os.ModePerm)
@@ -489,22 +490,28 @@ func (s *Store) processStrm(debridTorrent *types.Torrent, torrentStrmPath string
 
 	// For each file, create a .strm file containing the HTTP URL
 	for _, file := range files {
-		if file.Link == "" {
-			s.logger.Warn().Msgf("No download link available for file: %s", file.Name)
+		s.logger.Debug().Msgf("Processing file: %s (file_id=%s, torrent_id=%s)", file.Name, file.Id, file.TorrentId)
+
+		// Get streaming URL from the debrid client (each provider constructs it appropriately)
+		downloadURL := client.GetStreamingURL(debridTorrent, &file)
+		if downloadURL == "" {
+			s.logger.Warn().Msgf("No streaming URL available for file: %s", file.Name)
 			continue
 		}
+
+		s.logger.Debug().Msgf("Generated streaming URL: %s", downloadURL)
 
 		// Create strm file path by replacing the original extension with .strm
 		strmFileName := utils.RemoveExtension(file.Name) + ".strm"
 		strmFilePath := filepath.Join(torrentStrmPath, strmFileName)
 
 		// Write the HTTP URL to the .strm file
-		if err := os.WriteFile(strmFilePath, []byte(file.Link), 0644); err != nil {
+		if err := os.WriteFile(strmFilePath, []byte(downloadURL), 0644); err != nil {
 			s.logger.Error().Msgf("Failed to create .strm file for %s: %v", file.Name, err)
 			continue
 		}
 
-		s.logger.Info().Msgf("Created .strm file: %s", strmFileName)
+		s.logger.Info().Msgf("Created .strm file: %s with file_id=%s", strmFileName, file.Id)
 	}
 
 	return torrentStrmPath, nil
@@ -532,9 +539,11 @@ func (s *Store) processMultiSeasonSymlinks(torrent *Torrent, debridTorrent *type
 	cfg := config.Get()
 	useStrm := cfg.LinkMode == "strm"
 
+	// Get debrid client
+	client := s.debrid.Debrid(debridTorrent.Debrid).Client()
+
 	// If using strm mode, get download links first
 	if useStrm {
-		client := s.debrid.Debrid(debridTorrent.Debrid).Client()
 		if err := client.GetFileDownloadLinks(debridTorrent); err != nil {
 			return fmt.Errorf("failed to get download links for strm mode: %w", err)
 		}
@@ -583,7 +592,7 @@ func (s *Store) processMultiSeasonSymlinks(torrent *Torrent, debridTorrent *type
 		if useStrm {
 			// STRM mode for multi-season
 			torrentSymlinkPath = filepath.Join(seasonTorrent.SavePath, seasonFolderName)
-			torrentSymlinkPath, err = s.processStrm(seasonDebridTorrent, torrentSymlinkPath)
+			torrentSymlinkPath, err = s.processStrm(client, seasonDebridTorrent, torrentSymlinkPath)
 		} else {
 			// Symlink mode for multi-season
 			cache := s.debrid.Debrid(debridTorrent.Debrid).Cache()

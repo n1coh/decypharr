@@ -28,4 +28,5 @@ type Client interface {
 	GetAvailableSlots() (int, error)
 	SyncAccounts() error // Updates each accounts details(like traffic, username, etc.)
 	DeleteDownloadLink(account *account.Account, downloadLink types.DownloadLink) error
+	GetStreamingURL(torrent *types.Torrent, file *types.File) string // Returns the streaming URL for .strm files with appropriate parameters
 }

@@ -239,17 +239,26 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 		totalFiles++
 		fileName := filepath.Base(f.Name)
 
+		tb.logger.Debug().
+			Int("file_id_from_api", f.Id).
+			Str("file_name", f.Name).
+			Int64("size", f.Size).
+			Msg("Processing file from Torbox API")
+
 		if !tb.addSamples && utils.IsSampleFile(f.AbsolutePath) {
 			skippedSamples++
+			tb.logger.Debug().Msgf("Skipped sample file: %s", fileName)
 			continue
 		}
 		if !cfg.IsAllowedFile(fileName) {
 			skippedFileType++
+			tb.logger.Debug().Msgf("Skipped file type: %s", fileName)
 			continue
 		}
 
 		if !cfg.IsSizeAllowed(f.Size) {
 			skippedSize++
+			tb.logger.Debug().Msgf("Skipped file size: %s", fileName)
 			continue
 		}
 
@@ -261,6 +270,12 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 			Size:      f.Size,
 			Path:      f.Name,
 		}
+
+		tb.logger.Debug().
+			Str("torrent_id", t.Id).
+			Str("file_id", file.Id).
+			Str("file_name", file.Name).
+			Msg("Added valid file to torrent")
 
 		// For downloaded torrents, set a placeholder link to indicate file is available
 		if data.DownloadFinished {
@@ -411,31 +426,39 @@ func (tb *Torbox) DeleteTorrent(torrentId string) error {
 }
 
 func (tb *Torbox) GetFileDownloadLinks(t *types.Torrent) error {
+	tb.logger.Debug().Msgf("Getting download links for %d files in torrent %s", len(t.Files), t.Name)
+
+	if len(t.Files) == 0 {
+		tb.logger.Warn().Msg("No files to process for download links")
+		return nil
+	}
+
 	filesCh := make(chan types.File, len(t.Files))
-	linkCh := make(chan types.DownloadLink)
 	errCh := make(chan error, len(t.Files))
 
 	var wg sync.WaitGroup
 	wg.Add(len(t.Files))
 	for _, file := range t.Files {
-		go func() {
+		go func(f types.File) {
 			defer wg.Done()
-			link, err := tb.GetDownloadLink(t, &file)
+			tb.logger.Debug().Msgf("Requesting download link for file: %s", f.Name)
+			link, err := tb.GetDownloadLink(t, &f)
 			if err != nil {
+				tb.logger.Error().Msgf("Error getting download link for %s: %v", f.Name, err)
 				errCh <- err
 				return
 			}
 			if link.DownloadLink != "" {
-				linkCh <- link
-				file.DownloadLink = link
+				tb.logger.Debug().Msgf("Got download link for file: %s", f.Name)
+				f.DownloadLink = link
 			}
-			filesCh <- file
-		}()
+			filesCh <- f
+		}(file)
 	}
 	go func() {
 		wg.Wait()
+		tb.logger.Debug().Msg("All download link requests completed")
 		close(filesCh)
-		close(linkCh)
 		close(errCh)
 	}()
 
@@ -444,15 +467,18 @@ func (tb *Torbox) GetFileDownloadLinks(t *types.Torrent) error {
 	for file := range filesCh {
 		files[file.Name] = file
 	}
+	tb.logger.Debug().Msgf("Collected %d files with download links", len(files))
 
 	// Check for errors
 	for err := range errCh {
 		if err != nil {
+			tb.logger.Error().Msgf("Error encountered during download link retrieval: %v", err)
 			return err // Return the first error encountered
 		}
 	}
 
 	t.Files = files
+	tb.logger.Debug().Msg("Successfully set all download links")
 	return nil
 }
 
@@ -673,6 +699,12 @@ func (tb *Torbox) GetAvailableSlots() (int, error) {
 	}
 
 	return availableSlots, nil
+}
+
+func (tb *Torbox) GetStreamingURL(torrent *types.Torrent, file *types.File) string {
+	// Construct Torbox streaming URL with redirect=true and zip_link=false for .strm files
+	return fmt.Sprintf("https://api.torbox.app/v1/api/torrents/requestdl?token=%s&torrent_id=%s&file_id=%s&zip_link=false&redirect=true",
+		tb.APIKey, torrent.Id, file.Id)
 }
 
 func (tb *Torbox) GetProfile() (*types.Profile, error) {
