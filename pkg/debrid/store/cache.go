@@ -51,14 +51,24 @@ type CachedTorrent struct {
 	AddedOn    time.Time `json:"added_on"`
 	IsComplete bool      `json:"is_complete"`
 	Bad        bool      `json:"bad"`
+	// STRM-specific fields
+	StrmUrls   map[string]string `json:"strm_urls,omitempty"` // Maps original filenames to streaming URLs
 }
 
 func (c CachedTorrent) copy() CachedTorrent {
+	strmUrls := make(map[string]string)
+	if c.StrmUrls != nil {
+		for k, v := range c.StrmUrls {
+			strmUrls[k] = v
+		}
+	}
+	
 	return CachedTorrent{
 		Torrent:    c.Torrent,
 		AddedOn:    c.AddedOn,
 		IsComplete: c.IsComplete,
 		Bad:        c.Bad,
+		StrmUrls:   strmUrls,
 	}
 }
 
@@ -766,6 +776,7 @@ func (c *Cache) Add(t *types.Torrent) error {
 		Torrent:    t,
 		IsComplete: len(t.Files) > 0,
 		AddedOn:    addedOn,
+		StrmUrls:   make(map[string]string), // Initialize STRM URLs map
 	}
 	c.setTorrent(ct, func(tor CachedTorrent) {
 		c.RefreshListings(true)
@@ -777,6 +788,36 @@ func (c *Cache) Add(t *types.Torrent) error {
 
 func (c *Cache) Client() common.Client {
 	return c.client
+}
+
+// AddStrmUrls updates the cache with STRM streaming URLs for a torrent
+func (c *Cache) AddStrmUrls(torrentId string, strmUrls map[string]string) error {
+	c.torrentsRefreshMu.Lock()
+	defer c.torrentsRefreshMu.Unlock()
+
+	// Get the existing torrent from cache
+	existingTorrent := c.GetTorrent(torrentId)
+	if existingTorrent == nil {
+		return fmt.Errorf("torrent %s not found in cache", torrentId)
+	}
+
+	// Create a copy with updated STRM URLs
+	updatedTorrent := existingTorrent.copy()
+	if updatedTorrent.StrmUrls == nil {
+		updatedTorrent.StrmUrls = make(map[string]string)
+	}
+
+	// Merge the new STRM URLs with existing ones
+	for filename, url := range strmUrls {
+		updatedTorrent.StrmUrls[filename] = url
+	}
+
+	// Update the torrent in cache
+	c.setTorrent(updatedTorrent, func(tor CachedTorrent) {
+		c.RefreshListings(true)
+	})
+
+	return nil
 }
 
 func (c *Cache) DeleteTorrent(id string) error {

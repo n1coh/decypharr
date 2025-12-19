@@ -133,6 +133,7 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 	// Check for multi-season torrent support
 	var isMultiSeason bool
 	var seasons []SeasonInfo
+	var strmFiles map[string]string
 	var err error
 	if !importReq.SkipMultiSeason {
 		isMultiSeason, seasons, err = s.detectMultiSeason(debridTorrent)
@@ -200,8 +201,26 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 
 			torrentSymlinkPath = filepath.Join(torrent.SavePath, utils.RemoveExtension(debridTorrent.Name))
 			s.logger.Debug().Msgf("Processing STRM files to: %s", torrentSymlinkPath)
-			torrentSymlinkPath, err = s.processStrm(client, debridTorrent, torrentSymlinkPath)
-			s.logger.Debug().Msgf("STRM processing completed, path: %s, err: %v", torrentSymlinkPath, err)
+			torrentSymlinkPath, strmFiles, err = s.processStrm(client, debridTorrent, torrentSymlinkPath)
+			s.logger.Debug().Msgf("STRM processing completed, path: %s, strm_files: %d, err: %v", torrentSymlinkPath, len(strmFiles), err)
+			
+			// Add torrent to cache with STRM information
+			if cache != nil {
+				s.logger.Info().Msgf("Adding STRM torrent to cache for %s", debridTorrent.Debrid)
+				if err := cache.Add(debridTorrent); err != nil {
+					s.logger.Error().Msgf("Failed to add STRM torrent to cache: %v", err)
+					// Don't fail the entire process if cache update fails
+				}
+				
+				// Update cache with STRM streaming URLs
+				if len(strmFiles) > 0 {
+					s.logger.Info().Msgf("Updating cache with %d STRM URLs for torrent %s", len(strmFiles), debridTorrent.Id)
+					if err := cache.AddStrmUrls(debridTorrent.Id, strmFiles); err != nil {
+						s.logger.Error().Msgf("Failed to add STRM URLs to cache: %v", err)
+						// Don't fail the entire process if STRM cache update fails
+					}
+				}
+			}
 		} else {
 			// Symlink mode
 			if cache != nil {

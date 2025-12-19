@@ -474,10 +474,10 @@ func (s *Store) processSymlink(debridTorrent *types.Torrent, torrentRclonePath, 
 	return torrentSymlinkPath, nil
 }
 
-func (s *Store) processStrm(client common.Client, debridTorrent *types.Torrent, torrentStrmPath string) (string, error) {
+func (s *Store) processStrm(client common.Client, debridTorrent *types.Torrent, torrentStrmPath string) (string, map[string]string, error) {
 	files := debridTorrent.GetFiles()
 	if len(files) == 0 {
-		return "", fmt.Errorf("no valid files found")
+		return "", nil, fmt.Errorf("no valid files found")
 	}
 
 	s.logger.Info().Msgf("Creating .strm files for %d files in torrent %s (ID: %s)", len(files), debridTorrent.Name, debridTorrent.Id)
@@ -485,8 +485,11 @@ func (s *Store) processStrm(client common.Client, debridTorrent *types.Torrent, 
 	// Create strm directory
 	err := os.MkdirAll(torrentStrmPath, os.ModePerm)
 	if err != nil {
-		return "", fmt.Errorf("failed to create directory: %s: %v", torrentStrmPath, err)
+		return "", nil, fmt.Errorf("failed to create directory: %s: %v", torrentStrmPath, err)
 	}
+
+	// Map to store original filename -> streaming URL mapping for cache
+	strmUrls := make(map[string]string)
 
 	// For each file, create a .strm file containing the HTTP URL
 	for _, file := range files {
@@ -501,6 +504,9 @@ func (s *Store) processStrm(client common.Client, debridTorrent *types.Torrent, 
 
 		s.logger.Debug().Msgf("Generated streaming URL: %s", downloadURL)
 
+		// Store the URL in cache mapping (original filename -> streaming URL)
+		strmUrls[file.Name] = downloadURL
+
 		// Create strm file path by replacing the original extension with .strm
 		strmFileName := utils.RemoveExtension(file.Name) + ".strm"
 		strmFilePath := filepath.Join(torrentStrmPath, strmFileName)
@@ -514,7 +520,7 @@ func (s *Store) processStrm(client common.Client, debridTorrent *types.Torrent, 
 		s.logger.Info().Msgf("Created .strm file: %s with file_id=%s", strmFileName, file.Id)
 	}
 
-	return torrentStrmPath, nil
+	return torrentStrmPath, strmUrls, nil
 }
 
 // getTorrentPaths returns mountPath and symlinkPath for a torrent
@@ -592,7 +598,7 @@ func (s *Store) processMultiSeasonSymlinks(torrent *Torrent, debridTorrent *type
 		if useStrm {
 			// STRM mode for multi-season
 			torrentSymlinkPath = filepath.Join(seasonTorrent.SavePath, seasonFolderName)
-			torrentSymlinkPath, err = s.processStrm(client, seasonDebridTorrent, torrentSymlinkPath)
+			torrentSymlinkPath, _, err = s.processStrm(client, seasonDebridTorrent, torrentSymlinkPath)
 		} else {
 			// Symlink mode for multi-season
 			cache := s.debrid.Debrid(debridTorrent.Debrid).Cache()
