@@ -3,6 +3,8 @@ package web
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,7 +23,18 @@ import (
 
 func (wb *Web) handleGetArrs(w http.ResponseWriter, r *http.Request) {
 	arrStorage := wire.Get().Arr()
-	request.JSONResponse(w, arrStorage.GetAll(), http.StatusOK)
+	arrs := arrStorage.GetAll()
+
+	// Log what we're returning
+	for _, a := range arrs {
+		wb.logger.Debug().
+			Str("name", a.Name).
+			Str("host", a.Host).
+			Bool("hasToken", a.Token != "").
+			Msg("Returning arr to UI")
+	}
+
+	request.JSONResponse(w, arrs, http.StatusOK)
 }
 
 func (wb *Web) handleAddContent(w http.ResponseWriter, r *http.Request) {
@@ -141,9 +154,18 @@ func (wb *Web) handleRepairMedia(w http.ResponseWriter, r *http.Request) {
 		arrs = append(arrs, req.ArrName)
 	}
 
+	wb.logger.Info().
+		Str("arrName", req.ArrName).
+		Strs("arrs", arrs).
+		Bool("async", req.Async).
+		Msg("Repair request received")
+
 	if req.Async {
+		// Copy arrs to avoid closure issues
+		arrsCopy := make([]string, len(arrs))
+		copy(arrsCopy, arrs)
 		go func() {
-			if err := _store.Repair().AddJob(arrs, req.MediaIds, req.AutoProcess, false); err != nil {
+			if err := _store.Repair().AddJob(arrsCopy, req.MediaIds, req.AutoProcess, false); err != nil {
 				wb.logger.Error().Err(err).Msg("Failed to repair media")
 			}
 		}()
@@ -234,7 +256,6 @@ func (wb *Web) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	currentConfig.LogLevel = updatedConfig.LogLevel
 	currentConfig.MinFileSize = updatedConfig.MinFileSize
 	currentConfig.MaxFileSize = updatedConfig.MaxFileSize
-	currentConfig.LinkMode = updatedConfig.LinkMode
 	currentConfig.RemoveStalledAfter = updatedConfig.RemoveStalledAfter
 	currentConfig.AllowedExt = updatedConfig.AllowedExt
 	currentConfig.DiscordWebhook = updatedConfig.DiscordWebhook
@@ -438,5 +459,139 @@ func (wb *Web) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 
 	request.JSONResponse(w, map[string]string{
 		"message": "Authentication settings updated successfully",
+	}, http.StatusOK)
+}
+
+type OrphanedTorrent struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Size       int64  `json:"size"`
+	AddedOn    string `json:"added_on"`
+	DebridName string `json:"debrid_name"`
+}
+
+func (wb *Web) handleListOrphanedTorrents(w http.ResponseWriter, r *http.Request) {
+	orphanedList := make([]OrphanedTorrent, 0)
+
+	// Read cache files directly from disk to detect orphans
+	cfg := config.Get()
+	for _, debridCfg := range cfg.Debrids {
+		cacheDir := filepath.Join("data", "cache", debridCfg.Name)
+
+		// Check if cache directory exists
+		if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
+			continue
+		}
+
+		// Read all JSON files in cache directory
+		files, err := os.ReadDir(cacheDir)
+		if err != nil {
+			wb.logger.Error().Err(err).Str("dir", cacheDir).Msg("Failed to read cache directory")
+			continue
+		}
+
+		for _, file := range files {
+			if !strings.HasSuffix(file.Name(), ".json") {
+				continue
+			}
+
+			filePath := filepath.Join(cacheDir, file.Name())
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				wb.logger.Error().Err(err).Str("file", filePath).Msg("Failed to read cache file")
+				continue
+			}
+
+			// Parse JSON to check for strm_urls field
+			var cacheData map[string]json.RawMessage
+			if err := json.Unmarshal(data, &cacheData); err != nil {
+				wb.logger.Error().Err(err).Str("file", filePath).Msg("Failed to parse cache file")
+				continue
+			}
+
+			// Check if strm_urls field exists and is not empty
+			strmUrlsData, hasStrmUrls := cacheData["strm_urls"]
+			if !hasStrmUrls {
+				// No strm_urls field, this is orphaned
+				var torrent struct {
+					ID      string    `json:"id"`
+					Name    string    `json:"name"`
+					Bytes   int64     `json:"bytes"`
+					AddedOn time.Time `json:"added_on"`
+				}
+				if err := json.Unmarshal(data, &torrent); err == nil {
+					orphanedList = append(orphanedList, OrphanedTorrent{
+						ID:         torrent.ID,
+						Name:       torrent.Name,
+						Size:       torrent.Bytes,
+						AddedOn:    torrent.AddedOn.Format("2006-01-02 15:04:05"),
+						DebridName: debridCfg.Name,
+					})
+				}
+			} else {
+				// Check if strm_urls is empty object
+				var strmUrls map[string]string
+				if err := json.Unmarshal(strmUrlsData, &strmUrls); err == nil && len(strmUrls) == 0 {
+					var torrent struct {
+						ID      string    `json:"id"`
+						Name    string    `json:"name"`
+						Bytes   int64     `json:"bytes"`
+						AddedOn time.Time `json:"added_on"`
+					}
+					if err := json.Unmarshal(data, &torrent); err == nil {
+						orphanedList = append(orphanedList, OrphanedTorrent{
+							ID:         torrent.ID,
+							Name:       torrent.Name,
+							Size:       torrent.Bytes,
+							AddedOn:    torrent.AddedOn.Format("2006-01-02 15:04:05"),
+							DebridName: debridCfg.Name,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	request.JSONResponse(w, orphanedList, http.StatusOK)
+}
+
+func (wb *Web) handleCleanupOrphanedTorrents(w http.ResponseWriter, r *http.Request) {
+	_store := wire.Get()
+	caches := _store.Debrid().Caches()
+
+	totalDeleted := 0
+	results := make(map[string]int)
+
+	for debridName, cache := range caches {
+		if cache == nil {
+			continue
+		}
+
+		torrents := cache.GetTorrents()
+		orphanedIDs := make([]string, 0)
+
+		// Find torrents without strm_urls
+		for torrentID, torrent := range torrents {
+			if torrent.StrmUrls == nil || len(torrent.StrmUrls) == 0 {
+				orphanedIDs = append(orphanedIDs, torrentID)
+			}
+		}
+
+		// Delete orphaned torrents
+		if len(orphanedIDs) > 0 {
+			wb.logger.Info().
+				Str("debrid", debridName).
+				Int("count", len(orphanedIDs)).
+				Msg("Deleting orphaned torrents")
+
+			cache.DeleteTorrents(orphanedIDs)
+			results[debridName] = len(orphanedIDs)
+			totalDeleted += len(orphanedIDs)
+		}
+	}
+
+	request.JSONResponse(w, map[string]any{
+		"total_deleted": totalDeleted,
+		"by_debrid":     results,
 	}, http.StatusOK)
 }

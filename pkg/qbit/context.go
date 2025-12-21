@@ -144,8 +144,14 @@ func (q *QBit) authenticate(category, username, password string) (*arr.Arr, erro
 		downloadUncached := false
 		a = arr.New(category, "", "", false, false, &downloadUncached, "", "auto")
 	}
-	a.Host = username
-	a.Token = password
+
+	// Only update Host and Token if they're provided AND arr doesn't already have them configured
+	// This prevents overwriting configured values with empty credentials
+	if username != "" && password != "" {
+		a.Host = username
+		a.Token = password
+	}
+
 	arrValidated := false // This is a flag to indicate if arr validation was successful
 	if (a.Host == "" || a.Token == "") && cfg.UseAuth {
 		return nil, fmt.Errorf("unauthorized: Host and token are required for authentication(you've enabled authentication)")
@@ -160,8 +166,12 @@ func (q *QBit) authenticate(category, username, password string) (*arr.Arr, erro
 			return nil, fmt.Errorf("unauthorized: invalid credentials")
 		}
 	}
-	a.Source = "auto"
-	arrs.AddOrUpdate(a)
+
+	// Only update the arr in storage if it was created or modified
+	if a.Source != "auto" || (username != "" && password != "") {
+		a.Source = "auto"
+		arrs.AddOrUpdate(a)
+	}
 
 	return a, nil
 }

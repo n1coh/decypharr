@@ -57,6 +57,10 @@ func (wb *Web) Routes() http.Handler {
 			r.Post("/config", wb.handleUpdateConfig)
 			r.Post("/refresh-token", wb.handleRefreshAPIToken)
 			r.Post("/update-auth", wb.handleUpdateAuth)
+
+			// Cleanup operations
+			r.Get("/list-orphaned", wb.handleListOrphanedTorrents)
+			r.Post("/cleanup-orphaned", wb.handleCleanupOrphanedTorrents)
 		})
 	})
 

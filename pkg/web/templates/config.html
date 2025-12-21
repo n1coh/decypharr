@@ -150,19 +150,6 @@
                                         <span class="label-text-alt">Maximum file size to download</span>
                                     </div>
                                 </div>
-
-                                <div class="form-control">
-                                    <label class="label" for="linkMode">
-                                        <span class="label-text font-medium">Link Mode</span>
-                                    </label>
-                                    <select class="select select-bordered" name="link_mode" id="linkMode">
-                                        <option value="symlink">Symlink - Create symbolic links (default)</option>
-                                        <option value="strm">STRM - Create .strm files with HTTP URLs</option>
-                                    </select>
-                                    <div class="label">
-                                        <span class="label-text-alt">Choose between symlinks or .strm files for media access</span>
-                                    </div>
-                                </div>
                             </div>
 
                             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -309,9 +296,14 @@
                                 <h2 class="text-2xl font-bold flex items-center">
                                     <i class="bi bi-cloud mr-3 text-secondary"></i>Debrid Services
                                 </h2>
-                                <button type="button" id="addDebridBtn" class="btn btn-secondary">
-                                    <i class="bi bi-plus mr-2"></i>Add Debrid Service
-                                </button>
+                                <div class="flex gap-2">
+                                    <button type="button" id="cleanupOrphanedBtn" class="btn btn-warning">
+                                        <i class="bi bi-trash mr-2"></i>Cleanup Orphaned Torrents
+                                    </button>
+                                    <button type="button" id="addDebridBtn" class="btn btn-secondary">
+                                        <i class="bi bi-plus mr-2"></i>Add Debrid Service
+                                    </button>
+                                </div>
                             </div>
 
                             <div id="debridConfigs" class="space-y-4">
@@ -403,7 +395,7 @@
                                     <input type="checkbox" class="checkbox checkbox-lg" name="repair.enabled" id="repair.enabled">
                                     <div>
                                         <span class="label-text font-medium text-lg">Enable Scheduled Repair</span>
-                                        <div class="label-text-alt">Automatically repair broken symlinks and missing files</div>
+                                        <div class="label-text-alt">Automatically repair broken STRM files and missing content</div>
                                     </div>
                                 </label>
                             </div>
@@ -468,7 +460,7 @@
                                         <input type="checkbox" class="checkbox" name="repair.auto_process" id="repair.auto_process">
                                         <div>
                                             <span class="label-text font-medium">Auto Process</span>
-                                            <div class="label-text-alt">Automatically delete broken symlinks and re-search</div>
+                                            <div class="label-text-alt">Automatically delete broken STRM files and re-search</div>
                                         </div>
                                     </label>
                                 </div>
@@ -991,4 +983,44 @@
         }
     }
 </script>
+
+<!-- Modal for orphaned torrents list -->
+<dialog id="orphanedTorrentsModal" class="modal">
+    <div class="modal-box max-w-4xl">
+        <h3 class="font-bold text-lg mb-4">Torrents Orphelins Détectés</h3>
+        <p class="text-sm text-base-content/70 mb-4">Les torrents suivants n'ont pas de fichiers STRM associés et seront supprimés de Torbox :</p>
+
+        <div id="orphanedTorrentsList" class="overflow-x-auto max-h-96 mb-4">
+            <table class="table table-zebra table-sm">
+                <thead>
+                    <tr>
+                        <th>Nom</th>
+                        <th>Taille</th>
+                        <th>Date d'ajout</th>
+                        <th>Debrid</th>
+                    </tr>
+                </thead>
+                <tbody id="orphanedTorrentsTableBody">
+                    <!-- Will be populated by JavaScript -->
+                </tbody>
+            </table>
+        </div>
+
+        <div class="alert alert-warning mb-4">
+            <i class="bi bi-exclamation-triangle"></i>
+            <span>Cette action est irréversible. <span id="orphanedCount">0</span> torrent(s) seront supprimés.</span>
+        </div>
+
+        <div class="modal-action">
+            <button class="btn btn-ghost" onclick="document.getElementById('orphanedTorrentsModal').close()">Annuler</button>
+            <button class="btn btn-error" id="confirmDeleteOrphaned">
+                <i class="bi bi-trash mr-2"></i>Supprimer ces torrents
+            </button>
+        </div>
+    </div>
+    <form method="dialog" class="modal-backdrop">
+        <button>close</button>
+    </form>
+</dialog>
+
 {{ end }}

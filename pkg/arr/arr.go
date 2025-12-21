@@ -159,21 +159,54 @@ func InferType(host, name string) Type {
 }
 
 func NewStorage() *Storage {
+	log := logger.New("arr")
+	cfg := config.Get()
+	log.Info().Int("totalConfigArrs", len(cfg.Arrs)).Msg("Loading Arrs from configuration")
+
 	arrs := make(map[string]*Arr)
-	for _, a := range config.Get().Arrs {
+	skipped := 0
+	for _, a := range cfg.Arrs {
+		log.Debug().
+			Str("name", a.Name).
+			Str("host", a.Host).
+			Bool("hasToken", a.Token != "").
+			Msg("Processing arr from config")
+
 		if a.Host == "" || a.Token == "" || a.Name == "" {
+			log.Warn().
+				Str("name", a.Name).
+				Str("host", a.Host).
+				Bool("hasToken", a.Token != "").
+				Msg("Skipping arr - missing host, token, or name")
+			skipped++
 			continue // Skip if host or token is not set
 		}
 		name := a.Name
 		as := New(name, a.Host, a.Token, a.Cleanup, a.SkipRepair, a.DownloadUncached, a.SelectedDebrid, a.Source)
 		if request.ValidateURL(as.Host) != nil {
+			log.Warn().
+				Str("name", name).
+				Str("host", as.Host).
+				Msg("Skipping arr - invalid host URL")
+			skipped++
 			continue
 		}
 		arrs[a.Name] = as
+		log.Info().
+			Str("name", a.Name).
+			Str("host", a.Host).
+			Msg("Successfully loaded arr")
 	}
+
+	log.Info().
+		Int("loaded", len(arrs)).
+		Int("skipped", skipped).
+		Int("total", len(cfg.Arrs)).
+		Msg("Finished loading Arrs")
+
 	return &Storage{
 		Arrs:   arrs,
-		logger: logger.New("arr"),
+		logger: log,
 	}
 }
 

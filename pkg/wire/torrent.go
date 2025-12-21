@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid"
@@ -97,7 +96,7 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 		nextInterval := min(s.refreshInterval*2, 30*time.Second)
 		backoff.Reset(nextInterval)
 	}
-	var torrentSymlinkPath, torrentRclonePath string
+	var torrentSymlinkPath string
 	debridTorrent.Arr = _arr
 
 	// Check if debrid supports webdav by checking cache
@@ -146,37 +145,20 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 
 	switch importReq.Action {
 	case "symlink":
-		// Symlink action, we will create a symlink or strm file based on config
-		cfg := config.Get()
-		useStrm := cfg.LinkMode == "strm"
-
-		if useStrm {
-			s.logger.Debug().Msgf("Post-Download Action: STRM")
-		} else {
-			s.logger.Debug().Msgf("Post-Download Action: Symlink")
-		}
+		// STRM mode - create .strm files with streaming URLs
+		s.logger.Debug().Msgf("Post-Download Action: STRM")
 
 		cache := deb.Cache()
-
-		if !useStrm && cache != nil {
-			s.logger.Info().Msgf("Using internal webdav for %s", debridTorrent.Debrid)
-			// Use webdav to download the file
-			if err := cache.Add(debridTorrent); err != nil {
-				onFailed(err)
-				return
-			}
-		}
 
 		if isMultiSeason {
 			s.logger.Info().Msgf("Processing multi-season torrent with %d seasons", len(seasons))
 
-			// Remove any torrent already added
+			// Process multi-season with STRM
 			err := s.processMultiSeasonSymlinks(torrent, debridTorrent, seasons, importReq)
 			if err == nil {
-				// If an error occurred during multi-season processing, send it to normal processing
 				s.logger.Info().Msgf("Adding %s took %s", debridTorrent.Name, time.Since(timer))
 
-				go importReq.markAsCompleted(torrent, debridTorrent) // Mark the import request as completed, send callback if needed
+				go importReq.markAsCompleted(torrent, debridTorrent)
 				go func() {
 					if err := request.SendDiscordMessage("download_complete", "success", torrent.discordContext()); err != nil {
 						s.logger.Error().Msgf("Error sending discord message: %v", err)
@@ -189,54 +171,37 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 			}
 		}
 
-		if useStrm {
-			// For STRM mode, we need download links
-			s.logger.Debug().Msgf("Getting download links for STRM mode...")
-			if err := client.GetFileDownloadLinks(debridTorrent); err != nil {
-				s.logger.Error().Msgf("Failed to get download links: %v", err)
-				onFailed(err)
-				return
-			}
-			s.logger.Debug().Msgf("Download links retrieved successfully")
+		// For STRM mode, we need download links
+		s.logger.Info().Msgf("Starting STRM processing for torrent %s (ID: %s)", debridTorrent.Name, debridTorrent.Id)
+		s.logger.Debug().Msgf("Getting download links for STRM mode...")
+		if err := client.GetFileDownloadLinks(debridTorrent); err != nil {
+			s.logger.Error().Msgf("Failed to get download links: %v", err)
+			onFailed(err)
+			return
+		}
+		s.logger.Info().Msgf("Successfully retrieved download links for %d files", len(debridTorrent.Files))
 
-			torrentSymlinkPath = filepath.Join(torrent.SavePath, utils.RemoveExtension(debridTorrent.Name))
-			s.logger.Debug().Msgf("Processing STRM files to: %s", torrentSymlinkPath)
-			torrentSymlinkPath, strmFiles, err = s.processStrm(client, debridTorrent, torrentSymlinkPath)
-			s.logger.Debug().Msgf("STRM processing completed, path: %s, strm_files: %d, err: %v", torrentSymlinkPath, len(strmFiles), err)
-			
-			// Add torrent to cache with STRM information
-			if cache != nil {
-				s.logger.Info().Msgf("Adding STRM torrent to cache for %s", debridTorrent.Debrid)
-				if err := cache.Add(debridTorrent); err != nil {
-					s.logger.Error().Msgf("Failed to add STRM torrent to cache: %v", err)
-					// Don't fail the entire process if cache update fails
-				}
-				
-				// Update cache with STRM streaming URLs
-				if len(strmFiles) > 0 {
-					s.logger.Info().Msgf("Updating cache with %d STRM URLs for torrent %s", len(strmFiles), debridTorrent.Id)
-					if err := cache.AddStrmUrls(debridTorrent.Id, strmFiles); err != nil {
-						s.logger.Error().Msgf("Failed to add STRM URLs to cache: %v", err)
-						// Don't fail the entire process if STRM cache update fails
-					}
-				}
-			}
-		} else {
-			// Symlink mode
-			if cache != nil {
-				torrentRclonePath = filepath.Join(debridTorrent.MountPath, cache.GetTorrentFolder(debridTorrent)) // /mnt/remote/realdebrid/MyTVShow
-				torrentSymlinkPath = filepath.Join(torrent.SavePath, utils.RemoveExtension(debridTorrent.Name))   // /mnt/symlinks/{category}/MyTVShow/
+		torrentSymlinkPath = filepath.Join(torrent.SavePath, utils.RemoveExtension(debridTorrent.Name))
+		s.logger.Info().Msgf("Creating STRM files in directory: %s", torrentSymlinkPath)
+		torrentSymlinkPath, strmFiles, err = s.processStrm(client, debridTorrent, torrentSymlinkPath)
+		s.logger.Info().Msgf("STRM processing completed with result: path=%s, strm_count=%d, err=%v", torrentSymlinkPath, len(strmFiles), err)
 
-			} else {
-				// User is using either zurg or debrid webdav
-				torrentRclonePath, torrentSymlinkPath, err = s.getTorrentPaths(torrent.SavePath, debridTorrent)
-				if err != nil {
-					onFailed(err)
-					return
-				}
+		// Add torrent to cache with STRM information
+		if cache != nil {
+			s.logger.Info().Msgf("Adding STRM torrent to cache for %s", debridTorrent.Debrid)
+			if err := cache.Add(debridTorrent); err != nil {
+				s.logger.Error().Msgf("Failed to add STRM torrent to cache: %v", err)
+				// Don't fail the entire process if cache update fails
 			}
 
-			torrentSymlinkPath, err = s.processSymlink(debridTorrent, torrentRclonePath, torrentSymlinkPath)
+			// Update cache with STRM streaming URLs
+			if len(strmFiles) > 0 {
+				s.logger.Info().Msgf("Updating cache with %d STRM URLs for torrent %s", len(strmFiles), debridTorrent.Id)
+				if err := cache.AddStrmUrls(debridTorrent.Id, strmFiles); err != nil {
+					s.logger.Error().Msgf("Failed to add STRM URLs to cache: %v", err)
+					// Don't fail the entire process if STRM cache update fails
+				}
+			}
 		}
 
 		if err != nil {

@@ -32,7 +32,16 @@ func (a *Arr) GetMedia(mediaId string) ([]Content, error) {
 		return GetMovies(a, mediaId)
 	}
 	// This is likely Sonarr
-	resp, err := a.Request(http.MethodGet, fmt.Sprintf("api/v3/series?tvdbId=%s", mediaId), nil)
+	var endpoint string
+	if mediaId == "" {
+		// Get all series
+		endpoint = "api/v3/series"
+	} else {
+		// Get specific series by tvdbId
+		endpoint = fmt.Sprintf("api/v3/series?tvdbId=%s", mediaId)
+	}
+
+	resp, err := a.Request(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +128,16 @@ func (a *Arr) GetMedia(mediaId string) ([]Content, error) {
 }
 
 func GetMovies(a *Arr, tvId string) ([]Content, error) {
-	resp, err := a.Request(http.MethodGet, fmt.Sprintf("api/v3/movie?tmdbId=%s", tvId), nil)
+	var endpoint string
+	if tvId == "" {
+		// Get all movies
+		endpoint = "api/v3/movie"
+	} else {
+		// Get specific movie by tmdbId
+		endpoint = fmt.Sprintf("api/v3/movie?tmdbId=%s", tvId)
+	}
+
+	resp, err := a.Request(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}

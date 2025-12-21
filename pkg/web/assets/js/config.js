@@ -41,6 +41,12 @@ class ConfigManager {
         this.refs.addDebridBtn.addEventListener('click', () => this.addDebridConfig());
         this.refs.addArrBtn.addEventListener('click', () => this.addArrConfig());
 
+        // Cleanup orphaned torrents button
+        const cleanupBtn = document.getElementById('cleanupOrphanedBtn');
+        if (cleanupBtn) {
+            cleanupBtn.addEventListener('click', () => this.cleanupOrphanedTorrents());
+        }
+
         // WebDAV toggle handlers
         document.addEventListener('change', (e) => {
             if (e.target.classList.contains('useWebdav')) {
@@ -245,9 +251,6 @@ class ConfigManager {
                                 <span class="label-text font-medium">Service Type</span>
                             </label>
                             <select class="select select-bordered" name="debrid[${index}].name" id="debrid[${index}].name" required>
-                                <option value="realdebrid">Real Debrid</option>
-                                <option value="alldebrid">AllDebrid</option>
-                                <option value="debridlink">Debrid Link</option>
                                 <option value="torbox">Torbox</option>
                             </select>
                         </div>
@@ -951,9 +954,6 @@ class ConfigManager {
                             </label>
                             <select class="select select-bordered" name="arr[${index}].selected_debrid" id="arr[${index}].selected_debrid">
                                 <option value="" selected>Auto-select</option>
-                                <option value="realdebrid">Real Debrid</option>
-                                <option value="alldebrid">AllDebrid</option>
-                                <option value="debridlink">Debrid Link</option>
                                 <option value="torbox">Torbox</option>
                             </select>
                             <div class="label">
@@ -1091,7 +1091,7 @@ class ConfigManager {
                 .split(',').map(ext => ext.trim()).filter(Boolean),
             min_file_size: document.getElementById('minFileSize').value,
             max_file_size: document.getElementById('maxFileSize').value,
-            link_mode: document.getElementById('linkMode').value,
+            link_mode: document.getElementById('linkMode')?.value || 'symlink',
             remove_stalled_after: document.getElementById('removeStalledAfter').value,
             callback_url: document.getElementById('callbackUrl').value,
 
@@ -1333,6 +1333,124 @@ class ConfigManager {
         if (usernameField && config.auth_username) {
             usernameField.value = config.auth_username;
         }
+    }
+
+    async cleanupOrphanedTorrents() {
+        const cleanupBtn = document.getElementById('cleanupOrphanedBtn');
+        if (!cleanupBtn) return;
+
+        // Disable button and show loading state
+        const originalHTML = cleanupBtn.innerHTML;
+        cleanupBtn.disabled = true;
+        cleanupBtn.innerHTML = '<span class="loading loading-spinner loading-sm"></span> Recherche...';
+
+        try {
+            // First, get the list of orphaned torrents
+            const listResponse = await window.decypharrUtils.fetcher('/api/list-orphaned');
+            if (!listResponse.ok) {
+                throw new Error('Failed to fetch orphaned torrents list');
+            }
+
+            const orphanedList = await listResponse.json();
+
+            if (orphanedList.length === 0) {
+                window.decypharrUtils.createToast('Aucun torrent orphelin trouvé', 'info');
+                return;
+            }
+
+            // Show the modal with the list
+            this.showOrphanedTorrentsModal(orphanedList);
+
+        } catch (error) {
+            console.error('Error fetching orphaned torrents:', error);
+            window.decypharrUtils.createToast(`Erreur: ${error.message}`, 'error');
+        } finally {
+            // Re-enable button
+            cleanupBtn.disabled = false;
+            cleanupBtn.innerHTML = originalHTML;
+        }
+    }
+
+    showOrphanedTorrentsModal(orphanedList) {
+        const modal = document.getElementById('orphanedTorrentsModal');
+        const tableBody = document.getElementById('orphanedTorrentsTableBody');
+        const countSpan = document.getElementById('orphanedCount');
+
+        // Clear previous content
+        tableBody.innerHTML = '';
+
+        // Populate table
+        orphanedList.forEach(torrent => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td class="max-w-md truncate" title="${torrent.name}">${torrent.name}</td>
+                <td>${this.formatBytes(torrent.size)}</td>
+                <td>${torrent.added_on}</td>
+                <td><span class="badge badge-primary">${torrent.debrid_name}</span></td>
+            `;
+            tableBody.appendChild(row);
+        });
+
+        // Update count
+        countSpan.textContent = orphanedList.length;
+
+        // Show modal
+        modal.showModal();
+
+        // Setup confirm button
+        const confirmBtn = document.getElementById('confirmDeleteOrphaned');
+        confirmBtn.onclick = () => this.executeCleanup(modal);
+    }
+
+    async executeCleanup(modal) {
+        const confirmBtn = document.getElementById('confirmDeleteOrphaned');
+        const originalHTML = confirmBtn.innerHTML;
+
+        confirmBtn.disabled = true;
+        confirmBtn.innerHTML = '<span class="loading loading-spinner loading-sm"></span> Suppression...';
+
+        try {
+            const response = await window.decypharrUtils.fetcher('/api/cleanup-orphaned', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(errorText || 'Failed to cleanup orphaned torrents');
+            }
+
+            const result = await response.json();
+
+            if (result.total_deleted > 0) {
+                let message = `${result.total_deleted} torrent(s) orphelin(s) supprimé(s) avec succès`;
+                if (result.by_debrid) {
+                    const details = Object.entries(result.by_debrid)
+                        .map(([debrid, count]) => `${debrid}: ${count}`)
+                        .join(', ');
+                    message += ` (${details})`;
+                }
+                window.decypharrUtils.createToast(message, 'success');
+            }
+
+            // Close modal
+            modal.close();
+
+        } catch (error) {
+            console.error('Error cleaning up orphaned torrents:', error);
+            window.decypharrUtils.createToast(`Erreur: ${error.message}`, 'error');
+        } finally {
+            confirmBtn.disabled = false;
+            confirmBtn.innerHTML = originalHTML;
+        }
+    }
+
+    formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
     }
 }
 

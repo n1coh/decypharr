@@ -3,7 +3,6 @@ package repair
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -13,45 +12,8 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/debrid/store"
 )
 
-func fileIsSymlinked(file string) bool {
-	info, err := os.Lstat(file)
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeSymlink != 0
-}
-
-func getSymlinkTarget(file string) string {
-	if fileIsSymlinked(file) {
-		target, err := os.Readlink(file)
-		if err != nil {
-			return ""
-		}
-		if !filepath.IsAbs(target) {
-			dir := filepath.Dir(file)
-			target = filepath.Join(dir, target)
-		}
-		return target
-	}
-	return ""
-}
-
 func fileIsStrm(file string) bool {
 	return strings.HasSuffix(strings.ToLower(file), ".strm")
-}
-
-func getStrmURL(file string) string {
-	if !fileIsStrm(file) {
-		return ""
-	}
-
-	content, err := os.ReadFile(file)
-	if err != nil {
-		return ""
-	}
-
-	// Return the URL from the file, trimming any whitespace
-	return strings.TrimSpace(string(content))
 }
 
 // validateStrmURL checks if the URL in a .strm file is still valid by making a HEAD request
@@ -85,6 +47,11 @@ func validateStrmURL(url string) error {
 	defer resp.Body.Close()
 
 	// Check HTTP status code
+	// Ignore 429 (Too Many Requests) - this is a temporary rate limit, not a broken file
+	if resp.StatusCode == 429 {
+		return nil // Consider file valid despite rate limit
+	}
+
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("URL returned status %d", resp.StatusCode)
 	}
@@ -92,86 +59,19 @@ func validateStrmURL(url string) error {
 	return nil
 }
 
-func fileIsReadable(filePath string) error {
-	// First check if file exists and is accessible
-	info, err := os.Stat(filePath)
-	if err != nil {
-		return err
-	}
-
-	// Check if it's a regular file
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("not a regular file")
-	}
-
-	// Special handling for .strm files
-	if fileIsStrm(filePath) {
-		// Read the URL from the .strm file
-		url := getStrmURL(filePath)
-		if url == "" {
-			return fmt.Errorf("strm file contains no URL")
-		}
-
-		// Validate that the URL is still accessible
-		if err := validateStrmURL(url); err != nil {
-			return fmt.Errorf("strm URL validation failed: %w", err)
-		}
-
-		return nil
-	}
-
-	// For non-.strm files, try to read the first 1024 bytes
-	err = checkFileStart(filePath)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func checkFileStart(filePath string) error {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	// Read first 1kb
-	buffer := make([]byte, 1024)
-	_, err = f.Read(buffer)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 func collectFiles(media arr.Content) map[string][]arr.ContentFile {
 	uniqueParents := make(map[string][]arr.ContentFile)
 	files := media.Files
 	for _, file := range files {
-		// Check if it's a symlink
-		target := getSymlinkTarget(file.Path)
-		if target != "" {
-			file.IsSymlink = true
-			dir, f := filepath.Split(target)
-			torrentNamePath := filepath.Clean(dir)
-			// Set target path folder/file.mkv
-			file.TargetPath = f
-			uniqueParents[torrentNamePath] = append(uniqueParents[torrentNamePath], file)
-			continue
-		}
-
-		// Check if it's a .strm file
+		// For STRM files, we only use the filename from the API
+		// No need to read the file from disk or check symlinks
+		// Validation will be done by regenerating URL from cache
 		if fileIsStrm(file.Path) {
-			strmURL := getStrmURL(file.Path)
-			if strmURL != "" {
-				file.IsSymlink = false
-				// For .strm files, we'll use the URL as a marker
-				// The parent folder will be extracted from the file's directory
-				dir := filepath.Dir(file.Path)
-				fileName := filepath.Base(file.Path)
-				file.TargetPath = fileName
-				uniqueParents[dir] = append(uniqueParents[dir], file)
-			}
+			file.IsSymlink = false
+			dir := filepath.Dir(file.Path)
+			fileName := filepath.Base(file.Path)
+			file.TargetPath = fileName
+			uniqueParents[dir] = append(uniqueParents[dir], file)
 		}
 	}
 	return uniqueParents

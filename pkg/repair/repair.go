@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -25,6 +23,8 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/debrid"
+	"github.com/sirrobot01/decypharr/pkg/debrid/store"
+	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -59,16 +59,16 @@ const (
 )
 
 type Job struct {
-	ID          string                       `json:"id"`
-	Arrs        []string                     `json:"arrs"`
-	MediaIDs    []string                     `json:"media_ids"`
-	StartedAt   time.Time                    `json:"created_at"`
-	BrokenItems map[string][]arr.ContentFile `json:"broken_items"`
-	Status      JobStatus                    `json:"status"`
-	CompletedAt time.Time                    `json:"finished_at"`
-	FailedAt    time.Time                    `json:"failed_at"`
-	AutoProcess bool                         `json:"auto_process"`
-	Recurrent   bool                         `json:"recurrent"`
+	ID            string                       `json:"id"`
+	Arrs          []string                     `json:"arrs"`
+	MediaIDs      []string                     `json:"media_ids"`
+	StartedAt     time.Time                    `json:"created_at"`
+	BrokenItems   map[string][]arr.ContentFile `json:"broken_items"`
+	Status        JobStatus                    `json:"status"`
+	CompletedAt   time.Time                    `json:"finished_at"`
+	FailedAt      time.Time                    `json:"failed_at"`
+	AutoProcess   bool                         `json:"auto_process"`
+	Recurrent     bool                         `json:"recurrent"`
 
 	Error string `json:"error"`
 
@@ -181,8 +181,18 @@ func (r *Repair) getArrs(arrNames []string) []string {
 				r.logger.Warn().Str("arrName", name).Msg("Arr not found")
 				continue
 			}
+			r.logger.Debug().
+				Str("arrName", name).
+				Str("host", a.Host).
+				Bool("hasToken", a.Token != "").
+				Int("tokenLen", len(a.Token)).
+				Msg("Checking arr configuration")
 			if a.Host == "" || a.Token == "" {
-				r.logger.Warn().Str("arrName", name).Msg("Arr not configured (missing host or token)")
+				r.logger.Warn().
+					Str("arrName", name).
+					Str("host", a.Host).
+					Bool("hasToken", a.Token != "").
+					Msg("Arr not configured (missing host or token)")
 				continue
 			}
 			arrs = append(arrs, a.Name)
@@ -242,40 +252,9 @@ func (r *Repair) onComplete() {
 }
 
 func (r *Repair) preRunChecks() error {
-	r.logger.Debug().
-		Bool("useWebdav", r.useWebdav).
-		Bool("isZurg", r.IsZurg).
-		Msg("Running pre-flight checks")
-
-	if r.useWebdav {
-		caches := r.deb.Caches()
-		r.logger.Debug().Int("numCaches", len(caches)).Msg("Checking webdav caches")
-		if len(caches) == 0 {
-			r.logger.Error().Msg("No caches found for webdav mode")
-			return fmt.Errorf("no caches found")
-		}
-		r.logger.Debug().Msg("Webdav caches available")
-		return nil
-	}
-
-	// Check if zurg url is reachable
-	if !r.IsZurg {
-		r.logger.Debug().Msg("Not using Zurg, skipping Zurg checks")
-		return nil
-	}
-
-	zurgURL := fmt.Sprint(r.ZurgURL, "/http/version.txt")
-	r.logger.Debug().Str("url", zurgURL).Msg("Checking Zurg availability")
-	resp, err := http.Get(zurgURL)
-	if err != nil {
-		r.logger.Error().Err(err).Msgf("Precheck failed: Failed to reach zurg at %s", r.ZurgURL)
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		r.logger.Error().Int("statusCode", resp.StatusCode).Msg("Precheck failed: Zurg returned non-OK status")
-		return fmt.Errorf("zurg returned status %d", resp.StatusCode)
-	}
-	r.logger.Debug().Msg("Zurg is reachable")
+	// With STRM files, we don't need to check mounts
+	// STRM files contain HTTP URLs - no mount required
+	r.logger.Debug().Msg("Pre-run checks: STRM mode - no mount checks needed")
 	return nil
 }
 
@@ -286,7 +265,7 @@ func (r *Repair) AddJob(arrsNames []string, mediaIDs []string, autoProcess, recu
 		Bool("autoProcess", autoProcess).
 		Bool("recurrent", recurrent).
 		Msg("AddJob called")
-		
+
 	key := jobKey(arrsNames, mediaIDs)
 	job, ok := r.Jobs[key]
 	if job != nil && job.Status == JobStarted {
@@ -533,11 +512,6 @@ func (r *Repair) repairArr(job *Job, _arr string, tmdbId string) ([]arr.ContentF
 		r.logger.Debug().Msgf("No %s media found", a.Name)
 		return brokenItems, nil
 	}
-	// Check first media to confirm mounts are accessible
-	if err := r.checkMountUp(media); err != nil {
-		r.logger.Error().Err(err).Msgf("Mount check failed for %s", a.Name)
-		return brokenItems, fmt.Errorf("mount check failed: %w", err)
-	}
 
 	// Mutex for brokenItems
 	var mu sync.Mutex
@@ -600,47 +574,9 @@ func (r *Repair) repairArr(job *Job, _arr string, tmdbId string) ([]arr.ContentF
 	return brokenItems, nil
 }
 
-// checkMountUp checks if the mounts are accessible
-func (r *Repair) checkMountUp(media []arr.Content) error {
-	firstMedia := media[0]
-	for _, m := range media {
-		if len(m.Files) > 0 {
-			firstMedia = m
-			break
-		}
-	}
-	files := firstMedia.Files
-	if len(files) == 0 {
-		return fmt.Errorf("no files found in media %s", firstMedia.Title)
-	}
-	for _, file := range files {
-		if _, err := os.Stat(file.Path); os.IsNotExist(err) {
-			// If the file does not exist, we can't check the symlink target
-			r.logger.Debug().Msgf("File %s does not exist, skipping repair", file.Path)
-			return fmt.Errorf("file %s does not exist, skipping repair", file.Path)
-		}
-		// Get the symlink target
-		symlinkPath := getSymlinkTarget(file.Path)
-		if symlinkPath != "" {
-			r.logger.Trace().Msgf("Found symlink target for %s: %s", file.Path, symlinkPath)
-			if _, err := os.Stat(symlinkPath); os.IsNotExist(err) {
-				r.logger.Debug().Msgf("Symlink target %s does not exist, skipping repair", symlinkPath)
-				return fmt.Errorf("symlink target %s does not exist for %s. skipping repair", symlinkPath, file.Path)
-			}
-		}
-	}
-	return nil
-}
-
 func (r *Repair) getBrokenFiles(job *Job, media arr.Content) []arr.ContentFile {
-
-	if r.useWebdav {
-		return r.getWebdavBrokenFiles(job, media)
-	} else if r.IsZurg {
-		return r.getZurgBrokenFiles(job, media)
-	} else {
-		return r.getFileBrokenFiles(job, media)
-	}
+	// With STRM files, all modes work the same - just check file existence
+	return r.getFileBrokenFiles(job, media)
 }
 
 func (r *Repair) getFileBrokenFiles(job *Job, media arr.Content) []arr.ContentFile {
@@ -662,15 +598,14 @@ func (r *Repair) getFileBrokenFiles(job *Job, media arr.Content) []arr.ContentFi
 			Int("numFiles", len(files)).
 			Msg("Checking files in parent directory")
 
-		// Check stat
-		// Check file stat first
+		// Check if STRM files are valid by regenerating URLs from cache
 		for _, file := range files {
 			r.logger.Debug().
 				Str("filePath", file.Path).
 				Str("fileName", file.Name).
-				Msg("Checking file readability")
+				Msg("Checking STRM file validity")
 
-			if err := fileIsReadable(file.Path); err != nil {
+			if err := r.isStrmFileValid(file.Path); err != nil {
 				r.logger.Debug().
 					Str("filePath", file.Path).
 					Str("parent", parent).
@@ -680,7 +615,7 @@ func (r *Repair) getFileBrokenFiles(job *Job, media arr.Content) []arr.ContentFi
 			} else {
 				r.logger.Debug().
 					Str("filePath", file.Path).
-					Msg("File is readable")
+					Msg("STRM file is valid")
 			}
 		}
 	}
@@ -692,107 +627,104 @@ func (r *Repair) getFileBrokenFiles(job *Job, media arr.Content) []arr.ContentFi
 	return brokenFiles
 }
 
-func (r *Repair) getZurgBrokenFiles(job *Job, media arr.Content) []arr.ContentFile {
-	// Use zurg setup to check file availability with zurg
-	// This reduces bandwidth usage significantly
-
-	brokenFiles := make([]arr.ContentFile, 0)
-	uniqueParents := collectFiles(media)
-	tr := &http.Transport{
-		TLSHandshakeTimeout: 60 * time.Second,
-		DialContext: (&net.Dialer{
-			Timeout:   20 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+// isStrmFileValid validates a STRM file by reading the URL and verifying it against cache
+// filePath comes from Radarr/Sonarr API and points to the actual .strm file on disk
+func (r *Repair) isStrmFileValid(filePath string) error {
+	// Only validate .strm files
+	if !strings.HasSuffix(strings.ToLower(filePath), ".strm") {
+		return nil // Non-STRM files are considered valid
 	}
-	client := request.New(request.WithTimeout(0), request.WithTransport(tr))
-	// Access zurg url + symlink folder + first file(encoded)
-	for parent, files := range uniqueParents {
-		r.logger.Debug().Msgf("Checking %s", parent)
-		torrentName := url.PathEscape(filepath.Base(parent))
 
-		if len(files) == 0 {
-			r.logger.Debug().Msgf("No files found for %s. Skipping", torrentName)
-			continue
-		}
-
-		for _, file := range files {
-			encodedFile := url.PathEscape(file.TargetPath)
-			fullURL := fmt.Sprintf("%s/http/__all__/%s/%s", r.ZurgURL, torrentName, encodedFile)
-			if _, err := os.Stat(file.Path); os.IsNotExist(err) {
-				r.logger.Debug().Msgf("Broken symlink found: %s", fullURL)
-				brokenFiles = append(brokenFiles, file)
-				continue
-			}
-			resp, err := client.Get(fullURL)
-			if err != nil {
-				r.logger.Error().Err(err).Msgf("Failed to reach %s", fullURL)
-				brokenFiles = append(brokenFiles, file)
-				continue
-			}
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				r.logger.Debug().Msgf("Failed to get download url for %s", fullURL)
-				if err := resp.Body.Close(); err != nil {
-					return nil
-				}
-				brokenFiles = append(brokenFiles, file)
-				continue
-			}
-			downloadUrl := resp.Request.URL.String()
-
-			if err := resp.Body.Close(); err != nil {
-				return nil
-			}
-			if downloadUrl != "" {
-				r.logger.Trace().Msgf("Found download url: %s", downloadUrl)
-			} else {
-				r.logger.Debug().Msgf("Failed to get download url for %s", fullURL)
-				brokenFiles = append(brokenFiles, file)
-				continue
-			}
-		}
+	// Read the STRM file to get the streaming URL
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read STRM file: %w", err)
 	}
-	if len(brokenFiles) == 0 {
-		r.logger.Debug().Msgf("No broken files found for %s", media.Title)
-		return nil
+
+	streamURL := strings.TrimSpace(string(content))
+	if streamURL == "" {
+		return fmt.Errorf("STRM file is empty")
 	}
-	r.logger.Debug().Msgf("%d broken files found for %s", len(brokenFiles), media.Title)
-	return brokenFiles
-}
 
-func (r *Repair) getWebdavBrokenFiles(job *Job, media arr.Content) []arr.ContentFile {
-	// Use internal webdav setup to check file availability
+	// Extract torrent_id and file_id from the URL
+	// Format: https://api.torbox.app/v1/api/torrents/requestdl?token=XXX&torrent_id=123&file_id=0
+	torrentID, fileID, err := r.extractIDsFromURL(streamURL)
+	if err != nil {
+		return fmt.Errorf("failed to extract IDs from URL: %w", err)
+	}
 
+	// Find the torrent in cache by ID
 	caches := r.deb.Caches()
-	if len(caches) == 0 {
-		r.logger.Info().Msg("No caches found. Can't use webdav")
-		return nil
-	}
+	var foundCache *store.Cache
+	var foundCachedTorrent *store.CachedTorrent
+	var foundDebridName string
 
-	clients := r.deb.Clients()
-	if len(clients) == 0 {
-		r.logger.Info().Msg("No clients found. Can't use webdav")
-		return nil
-	}
-
-	brokenFiles := make([]arr.ContentFile, 0)
-	uniqueParents := collectFiles(media)
-	for torrentPath, files := range uniqueParents {
-		select {
-		case <-job.ctx.Done():
-			return brokenFiles
-		default:
-		}
-		brokenFilesForTorrent := r.checkTorrentFiles(torrentPath, files, clients, caches)
-		if len(brokenFilesForTorrent) > 0 {
-			brokenFiles = append(brokenFiles, brokenFilesForTorrent...)
+	for debridName, cache := range caches {
+		if cachedTorrent := cache.GetTorrent(torrentID); cachedTorrent != nil {
+			foundCache = cache
+			foundCachedTorrent = cachedTorrent
+			foundDebridName = debridName
+			break
 		}
 	}
-	if len(brokenFiles) == 0 {
-		return nil
+
+	if foundCachedTorrent == nil {
+		return fmt.Errorf("torrent %s not found in cache", torrentID)
 	}
-	r.logger.Debug().Msgf("%d broken files found for %s", len(brokenFiles), media.Title)
-	return brokenFiles
+
+	// Find the file in the torrent by file_id
+	var foundFile *types.File
+	for _, file := range foundCachedTorrent.Files {
+		if file.Id == fileID {
+			foundFile = &file
+			break
+		}
+	}
+
+	if foundFile == nil {
+		return fmt.Errorf("file %s not found in torrent %s", fileID, torrentID)
+	}
+
+	// Update strm_urls in cache if not already present
+	if foundCachedTorrent.StrmUrls == nil || foundCachedTorrent.StrmUrls[foundFile.Name] != streamURL {
+		r.logger.Debug().Msgf("Updating strm_urls in cache for torrent %s, file %s", torrentID, foundFile.Name)
+		strmUrls := map[string]string{foundFile.Name: streamURL}
+		if err := foundCache.AddStrmUrls(torrentID, strmUrls); err != nil {
+			r.logger.Warn().Msgf("Failed to update strm_urls in cache: %v", err)
+			// Don't fail validation just because cache update failed
+		}
+	}
+
+	// Validate the URL with a HEAD request
+	if err := validateStrmURL(streamURL); err != nil {
+		return fmt.Errorf("streaming URL validation failed: %w", err)
+	}
+
+	r.logger.Debug().Msgf("STRM file validated successfully: torrent=%s, file=%s, debrid=%s", torrentID, fileID, foundDebridName)
+	return nil
+}
+
+// extractIDsFromURL extracts torrent_id and file_id from a streaming URL
+func (r *Repair) extractIDsFromURL(urlStr string) (torrentID string, fileID string, err error) {
+	// Parse the URL
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid URL: %w", err)
+	}
+
+	// Extract query parameters
+	query := u.Query()
+	torrentID = query.Get("torrent_id")
+	fileID = query.Get("file_id")
+
+	if torrentID == "" {
+		return "", "", fmt.Errorf("torrent_id not found in URL")
+	}
+	if fileID == "" {
+		return "", "", fmt.Errorf("file_id not found in URL")
+	}
+
+	return torrentID, fileID, nil
 }
 
 func (r *Repair) GetJob(id string) *Job {
