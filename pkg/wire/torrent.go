@@ -156,17 +156,8 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 			// Process multi-season with STRM
 			err := s.processMultiSeasonSymlinks(torrent, debridTorrent, seasons, importReq)
 			if err == nil {
-				s.logger.Info().Msgf("Adding %s took %s", debridTorrent.Name, time.Since(timer))
-
-				go importReq.markAsCompleted(torrent, debridTorrent)
-				go func() {
-					if err := request.SendDiscordMessage("download_complete", "success", torrent.discordContext()); err != nil {
-						s.logger.Error().Msgf("Error sending discord message: %v", err)
-					}
-				}()
-				go func() {
-					_arr.Refresh()
-				}()
+				// Use onSuccess to properly update the torrent state
+				onSuccess(torrent.SavePath)
 				return
 			}
 		}
