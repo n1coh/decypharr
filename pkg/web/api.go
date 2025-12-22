@@ -476,7 +476,7 @@ func (wb *Web) handleListOrphanedTorrents(w http.ResponseWriter, r *http.Request
 	// Read cache files directly from disk to detect orphans
 	cfg := config.Get()
 	for _, debridCfg := range cfg.Debrids {
-		cacheDir := filepath.Join("data", "cache", debridCfg.Name)
+		cacheDir := filepath.Join(cfg.Path, "cache", debridCfg.Name)
 
 		// Check if cache directory exists
 		if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
@@ -559,19 +559,23 @@ func (wb *Web) handleCleanupOrphanedTorrents(w http.ResponseWriter, r *http.Requ
 	_store := wire.Get()
 	caches := _store.Debrid().Caches()
 
-	totalDeleted := 0
+	totalToDelete := 0
 	results := make(map[string]int)
 
 	// Read cache files directly from disk to detect orphans (same as handleListOrphanedTorrents)
 	// This ensures we find all orphans even if cache is not fully loaded in memory
 	cfg := config.Get()
+
+	// Collect all orphaned IDs first
+	orphanedByDebrid := make(map[string][]string)
+
 	for _, debridCfg := range cfg.Debrids {
 		cache := caches[debridCfg.Name]
 		if cache == nil {
 			continue
 		}
 
-		cacheDir := filepath.Join("data", "cache", debridCfg.Name)
+		cacheDir := filepath.Join(cfg.Path, "cache", debridCfg.Name)
 
 		// Check if cache directory exists
 		if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
@@ -622,21 +626,39 @@ func (wb *Web) handleCleanupOrphanedTorrents(w http.ResponseWriter, r *http.Requ
 			}
 		}
 
-		// Delete orphaned torrents
 		if len(orphanedIDs) > 0 {
-			wb.logger.Info().
-				Str("debrid", debridCfg.Name).
-				Int("count", len(orphanedIDs)).
-				Msg("Deleting orphaned torrents")
-
-			cache.DeleteTorrents(orphanedIDs)
+			orphanedByDebrid[debridCfg.Name] = orphanedIDs
 			results[debridCfg.Name] = len(orphanedIDs)
-			totalDeleted += len(orphanedIDs)
+			totalToDelete += len(orphanedIDs)
 		}
 	}
 
+	// Return response immediately, then delete in background
 	request.JSONResponse(w, map[string]any{
-		"total_deleted": totalDeleted,
-		"by_debrid":     results,
-	}, http.StatusOK)
+		"total_queued": totalToDelete,
+		"by_debrid":    results,
+		"message":      "Deletion started in background. This may take several minutes.",
+	}, http.StatusAccepted)
+
+	// Delete torrents in background
+	go func() {
+		for debridName, orphanedIDs := range orphanedByDebrid {
+			cache := caches[debridName]
+			if cache == nil {
+				continue
+			}
+
+			wb.logger.Info().
+				Str("debrid", debridName).
+				Int("count", len(orphanedIDs)).
+				Msg("Starting background deletion of orphaned torrents")
+
+			cache.DeleteTorrents(orphanedIDs)
+
+			wb.logger.Info().
+				Str("debrid", debridName).
+				Int("count", len(orphanedIDs)).
+				Msg("Completed deletion of orphaned torrents")
+		}
+	}()
 }

@@ -874,15 +874,19 @@ func (c *Cache) validateAndDeleteTorrents(torrents []string) {
 // deleteTorrent deletes the torrent from the cache and debrid service
 // It also handles torrents with the same name but different IDs
 func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
+	// Always delete from debrid service and remove cache file, even if not in memory
+	defer func() {
+		c.removeFile(id, false)
+		if removeFromDebrid {
+			c.logger.Debug().Msgf("Deleting torrent %s from debrid service", id)
+			if err := c.client.DeleteTorrent(id); err != nil {
+				c.logger.Warn().Err(err).Msgf("Failed to delete torrent %s from debrid service", id)
+			}
+		}
+	}()
 
 	if torrent, ok := c.torrents.getByID(id); ok {
 		c.torrents.removeId(id) // Delete id from cache
-		defer func() {
-			c.removeFile(id, false)
-			if removeFromDebrid {
-				_ = c.client.DeleteTorrent(id) // Skip error handling, we don't care if it fails
-			}
-		}() // defer delete from debrid
 
 		torrentName := c.GetTorrentFolder(torrent.Torrent)
 
@@ -910,13 +914,20 @@ func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 		}
 		return true
 	}
-	return false
+
+	// Torrent not in memory cache, but we still deleted from debrid and disk (via defer)
+	c.logger.Debug().Msgf("Torrent %s not found in memory cache, but deleted from disk and debrid", id)
+	return true
 }
 
 func (c *Cache) DeleteTorrents(ids []string) {
 	c.logger.Info().Msgf("Deleting %d torrents", len(ids))
-	for _, id := range ids {
+	for i, id := range ids {
 		_ = c.deleteTorrent(id, true)
+		// Log progress every 10 deletions
+		if (i+1)%10 == 0 || i+1 == len(ids) {
+			c.logger.Info().Msgf("Deleted %d/%d torrents", i+1, len(ids))
+		}
 	}
 	c.listingDebouncer.Call(true)
 }
