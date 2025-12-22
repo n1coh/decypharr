@@ -73,14 +73,16 @@ func NewStorage(rcManager *rclone.Manager) *Storage {
 			mounter *rclone.Mount
 		)
 		_log := client.Logger()
+		// Always initialize cache for STRM mode support
+		// WebDAV mount is optional and only created if enabled
+		if dc.UseWebDav && cfg.Rclone.Enabled && rcManager != nil {
+			mounter = rclone.NewMount(dc.Name, dc.RcloneMountPath, webdavUrl, rcManager)
+		}
+		cache = debridStore.NewDebridCache(dc, client, mounter)
 		if dc.UseWebDav {
-			if cfg.Rclone.Enabled && rcManager != nil {
-				mounter = rclone.NewMount(dc.Name, dc.RcloneMountPath, webdavUrl, rcManager)
-			}
-			cache = debridStore.NewDebridCache(dc, client, mounter)
 			_log.Info().Msg("Debrid Service started with WebDAV")
 		} else {
-			_log.Info().Msg("Debrid Service started")
+			_log.Info().Msg("Debrid Service started (STRM mode with cache)")
 		}
 		debrids[dc.Name] = &Debrid{
 			cache:  cache,
