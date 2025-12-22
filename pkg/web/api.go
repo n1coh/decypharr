@@ -562,30 +562,75 @@ func (wb *Web) handleCleanupOrphanedTorrents(w http.ResponseWriter, r *http.Requ
 	totalDeleted := 0
 	results := make(map[string]int)
 
-	for debridName, cache := range caches {
+	// Read cache files directly from disk to detect orphans (same as handleListOrphanedTorrents)
+	// This ensures we find all orphans even if cache is not fully loaded in memory
+	cfg := config.Get()
+	for _, debridCfg := range cfg.Debrids {
+		cache := caches[debridCfg.Name]
 		if cache == nil {
 			continue
 		}
 
-		torrents := cache.GetTorrents()
+		cacheDir := filepath.Join("data", "cache", debridCfg.Name)
+
+		// Check if cache directory exists
+		if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
+			continue
+		}
+
+		// Read all JSON files in cache directory
+		files, err := os.ReadDir(cacheDir)
+		if err != nil {
+			wb.logger.Error().Err(err).Str("dir", cacheDir).Msg("Failed to read cache directory")
+			continue
+		}
+
 		orphanedIDs := make([]string, 0)
 
-		// Find torrents without strm_urls
-		for torrentID, torrent := range torrents {
-			if torrent.StrmUrls == nil || len(torrent.StrmUrls) == 0 {
+		for _, file := range files {
+			if !strings.HasSuffix(file.Name(), ".json") {
+				continue
+			}
+
+			filePath := filepath.Join(cacheDir, file.Name())
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				wb.logger.Error().Err(err).Str("file", filePath).Msg("Failed to read cache file")
+				continue
+			}
+
+			// Parse JSON to check for strm_urls field
+			var cacheData map[string]json.RawMessage
+			if err := json.Unmarshal(data, &cacheData); err != nil {
+				wb.logger.Error().Err(err).Str("file", filePath).Msg("Failed to parse cache file")
+				continue
+			}
+
+			// Check if strm_urls field exists and is not empty
+			strmUrlsData, hasStrmUrls := cacheData["strm_urls"]
+			if !hasStrmUrls {
+				// No strm_urls field, this is orphaned
+				torrentID := strings.TrimSuffix(file.Name(), ".json")
 				orphanedIDs = append(orphanedIDs, torrentID)
+			} else {
+				// Check if strm_urls is empty object
+				var strmUrls map[string]string
+				if err := json.Unmarshal(strmUrlsData, &strmUrls); err == nil && len(strmUrls) == 0 {
+					torrentID := strings.TrimSuffix(file.Name(), ".json")
+					orphanedIDs = append(orphanedIDs, torrentID)
+				}
 			}
 		}
 
 		// Delete orphaned torrents
 		if len(orphanedIDs) > 0 {
 			wb.logger.Info().
-				Str("debrid", debridName).
+				Str("debrid", debridCfg.Name).
 				Int("count", len(orphanedIDs)).
 				Msg("Deleting orphaned torrents")
 
 			cache.DeleteTorrents(orphanedIDs)
-			results[debridName] = len(orphanedIDs)
+			results[debridCfg.Name] = len(orphanedIDs)
 			totalDeleted += len(orphanedIDs)
 		}
 	}
