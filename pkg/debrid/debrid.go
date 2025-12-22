@@ -111,6 +111,19 @@ func (d *Storage) StartWorker(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
+	// Start all caches (needed for STRM mode even without WebDAV)
+	for name, debrid := range d.debrids {
+		if debrid != nil && debrid.cache != nil {
+			cache := debrid.cache
+			go func(cacheName string, c *debridStore.Cache) {
+				if err := c.Start(ctx); err != nil {
+					logger := c.Logger()
+					logger.Error().Err(err).Msgf("Failed to start cache for %s", cacheName)
+				}
+			}(name, cache)
+		}
+	}
+
 	// Start syncAccounts worker
 	go d.syncAccountsWorker(ctx)
 
