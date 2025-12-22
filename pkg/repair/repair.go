@@ -232,15 +232,16 @@ func (r *Repair) newJob(arrsNames []string, mediaIDs []string) *Job {
 
 // initRun initializes the repair run, setting up necessary configurations, checks and caches
 func (r *Repair) initRun(ctx context.Context) {
-	if r.useWebdav {
-		// Webdav use is enabled, initialize debrid torrent caches
-		caches := r.deb.Caches()
-		if len(caches) == 0 {
-			return
-		}
-		for name, cache := range caches {
-			r.torrentsMap.Store(name, cache.GetTorrentsName())
-		}
+	// Load debrid torrent caches for STRM validation
+	// This works with or without WebDAV since cache is always initialized for STRM mode
+	caches := r.deb.Caches()
+	if len(caches) == 0 {
+		r.logger.Warn().Msg("No caches available for repair")
+		return
+	}
+	for name, cache := range caches {
+		r.torrentsMap.Store(name, cache.GetTorrentsName())
+		r.logger.Debug().Msgf("Loaded %d torrents from %s cache", len(cache.GetTorrentsName()), name)
 	}
 }
 
