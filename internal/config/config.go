@@ -363,6 +363,11 @@ func (c *Config) updateDebrid(d Debrid) Debrid {
 	}
 	d.DownloadAPIKeys = downloadKeys
 
+	// Always set workers since cache is always initialized (STRM mode)
+	if d.Workers == 0 {
+		d.Workers = perDebrid
+	}
+
 	if !d.UseWebDav {
 		return d
 	}
@@ -372,9 +377,6 @@ func (c *Config) updateDebrid(d Debrid) Debrid {
 	}
 	if d.WebDav.DownloadLinksRefreshInterval == "" {
 		d.DownloadLinksRefreshInterval = cmp.Or(c.WebDav.DownloadLinksRefreshInterval, "40m") // 40 minutes
-	}
-	if d.Workers == 0 {
-		d.Workers = perDebrid
 	}
 	if d.FolderNaming == "" {
 		d.FolderNaming = cmp.Or(c.WebDav.FolderNaming, "original_no_ext")

@@ -105,7 +105,8 @@ type Cache struct {
 	repairChan chan RepairRequest
 
 	// readiness
-	ready chan struct{}
+	ready   chan struct{}
+	started atomic.Bool // prevents double Start()
 
 	// config
 	workers                      int
@@ -279,6 +280,13 @@ func (c *Cache) Reset() {
 }
 
 func (c *Cache) Start(ctx context.Context) error {
+	// Prevent double start
+	if c.started.Load() {
+		c.logger.Debug().Msg("Cache already started, skipping")
+		return nil
+	}
+	c.started.Store(true)
+
 	if err := os.MkdirAll(c.dir, 0755); err != nil {
 		return fmt.Errorf("failed to create cache directory: %w", err)
 	}
@@ -332,8 +340,11 @@ func (c *Cache) load(ctx context.Context) (map[string]CachedTorrent, error) {
 	}
 
 	if len(jsonFiles) == 0 {
+		c.logger.Debug().Msg("No cached files found on disk")
 		return nil, nil
 	}
+
+	c.logger.Debug().Msgf("Found %d JSON files to load, using %d workers", len(jsonFiles), c.workers)
 
 	// Create channels with appropriate buffering
 	workChan := make(chan os.DirEntry, min(c.workers, len(jsonFiles)))
@@ -342,6 +353,9 @@ func (c *Cache) load(ctx context.Context) (map[string]CachedTorrent, error) {
 	var wg sync.WaitGroup
 
 	torrents := make(map[string]CachedTorrent, len(jsonFiles))
+
+	// Track progress
+	var processed atomic.Int64
 
 	// Start workers
 	for i := 0; i < c.workers; i++ {
@@ -395,6 +409,12 @@ func (c *Cache) load(ctx context.Context) (map[string]CachedTorrent, error) {
 						mu.Unlock()
 					}
 				}
+
+				// Log progress every 100 files
+				count := processed.Add(1)
+				if count%100 == 0 {
+					c.logger.Debug().Msgf("Loaded %d/%d cache files", count, len(jsonFiles))
+				}
 			}
 		}()
 	}
@@ -419,17 +439,21 @@ func (c *Cache) load(ctx context.Context) (map[string]CachedTorrent, error) {
 }
 
 func (c *Cache) Sync(ctx context.Context) error {
+	c.logger.Debug().Msg("Loading cached torrents from disk...")
 	cachedTorrents, err := c.load(ctx)
 	if err != nil {
 		c.logger.Error().Err(err).Msg("Failed to load cache")
 	}
+	c.logger.Debug().Msgf("Loaded %d torrents from disk cache", len(cachedTorrents))
 
+	c.logger.Debug().Msg("Fetching torrents from API...")
 	torrents, err := c.client.GetTorrents()
 	if err != nil {
 		return fmt.Errorf("failed to sync torrents: %v", err)
 	}
 
 	totalTorrents := len(torrents)
+	c.logger.Debug().Msgf("Fetched %d torrents from API", totalTorrents)
 
 	c.logger.Info().Msgf("%d torrents found from %s", totalTorrents, c.client.Name())
 
